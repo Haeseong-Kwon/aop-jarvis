@@ -33,7 +33,8 @@ const voiceSchema = z.object({
   wakeWords: z.array(z.string()).default(['aop', 'a.o.p', '에이오피', '에이 오 피', 'jarvis', '자비스']),
   whisperBin: z.string().default('whisper-cli'),
   sttModelPath: z.string().default('~/Library/Application Support/aop-jarvis/models/ggml-small-q5_1.bin'),
-  sttLanguage: z.string().default('auto'),
+  // 'ko' measured faster and more accurate for Korean while still transcribing English phrases (whisper.cpp small).
+  sttLanguage: z.string().default('ko'),
   ttsVoiceKo: z.string().default('Yuna'),
   ttsVoiceEn: z.string().default('Samantha'),
   ttsRate: z.number().default(190),

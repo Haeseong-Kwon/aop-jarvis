@@ -132,3 +132,24 @@ describe('VoiceSession lifecycle', () => {
     expect(h.session.state).toBe('LISTENING')
   })
 })
+
+describe('voice safety', () => {
+  it('ignores whisper hallucinations instead of treating them as commands', async () => {
+    const h = harness(['감사합니다'])
+    h.session.wake()
+    h.session.speechStart()
+    await h.session.speechEnd(h.utterance)
+    expect(h.handled).toEqual([])
+    expect(h.session.state).toBe('LISTENING')
+  })
+
+  it('a typed command spoken back does not open a follow-up listening window', async () => {
+    const h = harness([])
+    const done = h.session.speak('ok', 'en')
+    await tick()
+    await tick()
+    h.finishPlayback()
+    await done
+    expect(h.session.state).toBe('IDLE')
+  })
+})

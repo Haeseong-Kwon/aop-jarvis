@@ -78,7 +78,7 @@ export interface VoiceSessionDeps {
   clearTimer?: (t: ReturnType<typeof setTimeout>) => void
 }
 
-const DEFAULT_FOLLOW_UP_MS = 7000
+const DEFAULT_FOLLOW_UP_MS = 5000
 const MIN_UTTERANCE_SAMPLES = 16_000 * 0.25
 
 /**
@@ -150,7 +150,7 @@ export class VoiceSession {
       return
     }
     if (wasIdle) {
-      const m = this.d.wake.match(text)
+      const m = isHallucination(text) ? { woke: false, command: '' } : this.d.wake.match(text)
       if (!m.woke) return
       this.d.bus.emit('voice:transcript', { text, final: true })
       if (!m.command) {
@@ -159,7 +159,7 @@ export class VoiceSession {
       }
       return this.run(m.command)
     }
-    if (!text || isNoise(text)) return this.armFollowUpIfListening(true)
+    if (!text || isNoise(text) || isHallucination(text)) return this.armFollowUpIfListening(true)
     this.d.bus.emit('voice:transcript', { text, final: true })
     return this.run(text)
   }
@@ -177,14 +177,21 @@ export class VoiceSession {
       return
     }
     if (signal.aborted || this._state !== 'THINKING') return
-    await this.speak(reply.speech, reply.lang)
+    await this.speak(reply.speech, reply.lang, true)
   }
 
-  async speak(text: string, lang: 'ko' | 'en'): Promise<void> {
-    if (!this.d.tts || !text.trim()) {
-      this.set('LISTENING')
-      return this.armFollowUp()
+  /**
+   * `followUp`: keep listening briefly without the wake word afterwards. Only voice turns do this —
+   * a typed command must never open the microphone to whatever is said next in the room.
+   */
+  async speak(text: string, lang: 'ko' | 'en', followUp = false): Promise<void> {
+    const after = () => {
+      if (followUp) {
+        this.set('LISTENING')
+        this.armFollowUp()
+      } else this.set('IDLE')
     }
+    if (!this.d.tts || !text.trim()) return after()
     let audio: Uint8Array
     try {
       audio = await this.d.tts.synthesize(speakable(text), lang)
@@ -195,10 +202,7 @@ export class VoiceSession {
     if (this._state !== 'THINKING' && this._state !== 'LISTENING' && this._state !== 'IDLE') return
     this.set('SPEAKING')
     await this.d.output.play(audio)
-    if ((this._state as VoiceState) === 'SPEAKING') {
-      this.set('LISTENING')
-      this.armFollowUp()
-    }
+    if ((this._state as VoiceState) === 'SPEAKING') after()
   }
 
   private interrupt(): void {
@@ -240,6 +244,10 @@ export class VoiceSession {
     this.d.bus.emit('voice:state', { state })
   }
 }
+
+// Whisper's well-known outputs for non-speech (subtitle-corpus artifacts), Korean and English.
+const HALLUCINATIONS = /^(감사합니다|고맙습니다|시청해\s*주셔서\s*감사합니다|구독과\s*좋아요.*|MBC\s*뉴스.*|thank you( for watching)?|thanks for watching|you|bye)[.!\s]*$/i
+export const isHallucination = (t: string): boolean => HALLUCINATIONS.test(t.trim())
 
 // Whisper emits these for silence / background noise.
 const isNoise = (t: string): boolean => /^[\s.\-–…]*$|^\[(blank_audio|music|silence|음악)\]$|^\(.*\)$/i.test(t)
