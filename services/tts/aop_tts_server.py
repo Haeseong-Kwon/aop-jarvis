@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import threading
 import time
 import traceback
@@ -264,6 +265,22 @@ def idle_reaper(state: State) -> None:
             print(json.dumps({"event": "idle_unload"}), flush=True)
 
 
+def exit_with_parent(poll_s: float = 2.0) -> None:
+    """The app spawns this sidecar; macOS app quit skips child cleanup, so stop when the parent is gone
+    (reparented to launchd). Covers normal quit, crash and force-quit — the model holds ~4.5 GB."""
+    parent = os.getppid()
+    if parent <= 1:
+        return  # started by hand (setup, audition): no parent to follow
+
+    def watch() -> None:
+        while True:
+            time.sleep(poll_s)
+            if os.getppid() != parent:
+                os._exit(0)
+
+    threading.Thread(target=watch, name="parent-watch", daemon=True).start()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=47821)
@@ -273,6 +290,7 @@ def main() -> None:
     ap.add_argument("--warm", default="", help="quality mode to load at start (CINEMATIC/BALANCED/FAST)")
     ap.add_argument("--idle-unload-min", type=float, default=30)
     args = ap.parse_args()
+    exit_with_parent()
 
     engine: Engine = DummyEngine(args.voices_dir) if args.engine == "dummy" else Qwen3Engine(args.voices_dir)
     state = State(engine, args.profiles, args.idle_unload_min * 60)
