@@ -9,3 +9,6 @@ target/
 coverage/
 .omc/
 .serena/project.local.yml
+
+# Personal audio (copyrighted tracks are never committed)
+sound source/

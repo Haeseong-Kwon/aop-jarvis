@@ -11,6 +11,9 @@ import { openDatabase } from './sql'
 const METRICS_INTERVAL_MS = 2000
 const AMBIENT_SIZE = 240
 const BOOT_AUDIO_TAIL_MS = 8000
+/** Music keeps playing this long after the greeting before fading out. */
+const GREETING_MUSIC_TAIL_MS = 4000
+const GREETING_VOICE_WAIT_MS = 10_000
 
 /** Owns the runtime and every host resource (mic, speakers, hotkey, window). The UI only calls its actions. */
 export class Controller {
@@ -165,6 +168,8 @@ export class Controller {
     this.update({ booting: true, booted: false })
     const cfg = this.rt.getConfig()
     void this.playBootAudio(cfg)
+    // Load the voice while the boot sequence plays, so the greeting can start the moment it ends (~3 s cold start).
+    if (cfg.voice.enabled && cfg.voice.bootGreeting) void this.warmVoice()
     await this.rt.checkReadiness().catch((error: unknown) => this.rt.bus.emit('error', { code: 'NOT_CONFIGURED', message: errorMessage(error) }))
     await this.registerHotkey(cfg.hotkey)
     void this.rt.context.refresh()
@@ -175,24 +180,26 @@ export class Controller {
   async bootComplete(): Promise<void> {
     this.update({ booting: false, booted: true })
     const cfg = this.rt.getConfig()
-    setTimeout(() => this.bootAudio.fadeOut(cfg.boot.fadeOutMs), BOOT_AUDIO_TAIL_MS)
-    if (cfg.voice.enabled) {
-      await this.startMic(cfg.voice.inputDeviceId)
-      void this.greet()
-    }
+    const fadeMusic = (afterMs: number) => setTimeout(() => this.bootAudio.fadeOut(cfg.boot.fadeOutMs), afterMs)
+    if (!cfg.voice.enabled) return void fadeMusic(BOOT_AUDIO_TAIL_MS)
+    await this.startMic(cfg.voice.inputDeviceId)
+    // The music plays under the greeting (ducked) and fades out after it, instead of cutting it off on a timer.
+    const greeted = await this.greet()
+    fadeMusic(greeted ? GREETING_MUSIC_TAIL_MS : BOOT_AUDIO_TAIL_MS)
   }
 
   /**
    * Cold-boot greeting only (never on ordinary wake). It waits briefly for the primary voice; if the premium
    * engine isn't ready, JARVIS stays silent rather than greeting in the fallback voice.
    */
-  private async greet(): Promise<void> {
+  private async greet(): Promise<boolean> {
     const cfg = this.rt.getConfig()
-    if (!cfg.voice.bootGreeting) return
-    const ready = await Promise.race([this.warmVoice().then(() => this.rt.tts.active === 'primary'), new Promise<boolean>((r) => setTimeout(() => r(false), 6000))])
-    if (!ready || store.get().voice !== 'IDLE') return
+    if (!cfg.voice.bootGreeting) return false
+    const ready = await Promise.race([this.warmVoice().then(() => this.rt.tts.active === 'primary'), new Promise<boolean>((r) => setTimeout(() => r(false), GREETING_VOICE_WAIT_MS))])
+    if (!ready || store.get().voice !== 'IDLE') return false
     const text = cfg.voice.bootGreetingText.trim() || (cfg.voice.sttLanguage === 'ko' ? '시스템 준비가 완료되었습니다.' : 'AOP online.')
     await this.voice.speak(text, /[가-힣]/.test(text) ? 'ko' : 'en')
+    return true
   }
 
   /** Lazy model residency: the TTS model loads on first voice use and then stays resident in the sidecar. */
