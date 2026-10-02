@@ -22,8 +22,9 @@ PY="$(command -v python3.12 || command -v python3.11 || command -v python3 || tr
 
 mkdir -p "$SUPPORT"
 if command -v uv >/dev/null; then
-  uv venv --python "$PY" "$VENV"
-  uv pip install --python "$VENV/bin/python" "mlx-audio==$MLX_AUDIO_VERSION" numpy soundfile
+  # uv provides a pinned 3.12 (mlx-audio wheels target 3.10–3.13) and seeds pip, so installs don't depend on `uv pip`.
+  uv venv --seed --python 3.12 "$VENV"
+  "$VENV/bin/python" -m pip install "mlx-audio==$MLX_AUDIO_VERSION" numpy soundfile
 else
   "$PY" -m venv "$VENV"
   "$VENV/bin/pip" install --upgrade pip
