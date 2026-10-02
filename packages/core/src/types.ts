@@ -66,6 +66,11 @@ export interface AgentResult {
   confidence: number
   /** Structured payload for downstream tasks (e.g. metrics, file list). */
   data?: unknown
+  /**
+   * What JARVIS should *say* when it differs from the display summary: a natural sentence instead of a
+   * telemetry line, or a short acknowledgement ("네.") when the screen already shows the result.
+   */
+  speech?: string
 }
 
 export interface Task {

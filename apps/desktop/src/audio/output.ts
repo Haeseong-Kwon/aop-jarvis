@@ -253,6 +253,8 @@ export interface BootAudioSettings {
 /** User-supplied boot track (never bundled). Synced to the boot timeline, ducked under speech. */
 export class BootAudio {
   private ctx = new AudioContext()
+  /** True from play() until the fade-out has finished. */
+  playing = false
   private gain = this.ctx.createGain()
   private source: AudioBufferSourceNode | null = null
   private volume = 0
@@ -276,6 +278,10 @@ export class BootAudio {
     this.gain.gain.linearRampToValueAtTime(this.volume, now + s.fadeInMs / 1000)
     source.start(now, Math.min(s.bootAudioStartOffset, Math.max(0, buffer.duration - 1)))
     this.source = source
+    this.playing = true
+    source.onended = () => {
+      if (this.source === source || this.source === null) this.playing = false
+    }
   }
 
   duck(active: boolean, s: BootAudioSettings): void {
@@ -294,6 +300,7 @@ export class BootAudio {
     this.gain.gain.linearRampToValueAtTime(0, now + ms / 1000)
     source.stop(now + ms / 1000 + 0.05)
     this.source = null
+    setTimeout(() => (this.playing = false), ms + 60)
     setTimeout(() => !this.source && void this.ctx.suspend(), ms + IDLE_SUSPEND_MS)
   }
 
@@ -304,6 +311,7 @@ export class BootAudio {
       /* not started */
     }
     this.source = null
+    this.playing = false
     void this.ctx.suspend()
   }
 }

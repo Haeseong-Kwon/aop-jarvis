@@ -46,36 +46,59 @@ const DEFAULTS = { maxChars: 420, firstChunkChars: 48, chunkChars: 140, koNumber
 
 // ---------------------------------------------------------------------------------------------- lexicon
 
-/** Acronyms and terms whose reading must not be left to the engine. Uppercase keys match case-sensitively. */
+/**
+ * Pronunciation lexicon (term → spoken form per language). Measured on Qwen3-TTS (docs/VOICE_AUDIT.md):
+ * acronyms read cleanly as English letters inside Korean (CPU, API, AOP), so they stay English; some English
+ * words get Korean phonology and are mangled ("Buyer Pilot" → "바이오 파일로트", "bottleneck" → "바털랭"), so
+ * they get the loanword a Korean speaker would say. Keys with spaces match as phrases. Extend via voice.lexicon.
+ */
 export const LEXICON: Record<string, { ko?: string; en?: string }> = {
-  AOP: { ko: '에이오피', en: 'A O P' },
+  AOP: { en: 'A O P' },
   JARVIS: { ko: '자비스', en: 'Jarvis' },
-  RAM: { ko: '메모리', en: 'RAM' },
-  CPU: { ko: '씨피유', en: 'C P U' },
-  GPU: { ko: '지피유', en: 'G P U' },
-  SSD: { ko: '에스에스디', en: 'S S D' },
-  API: { ko: '에이피아이', en: 'A P I' },
-  LLM: { ko: '엘엘엠', en: 'L L M' },
-  TTS: { ko: '티티에스', en: 'T T S' },
-  STT: { ko: '에스티티', en: 'S T T' },
-  URL: { ko: '유알엘', en: 'U R L' },
-  UI: { ko: '유아이', en: 'U I' },
-  PR: { ko: '피알', en: 'P R' },
-  CI: { ko: '씨아이', en: 'C I' },
+  RAM: { ko: '램', en: 'RAM' },
+  CPU: { en: 'C P U' },
+  GPU: { en: 'G P U' },
+  SSD: { en: 'S S D' },
+  API: { en: 'A P I' },
+  LLM: { en: 'L L M' },
+  TTS: { en: 'T T S' },
+  STT: { en: 'S T T' },
+  URL: { en: 'U R L' },
+  UI: { en: 'U I' },
+  PR: { en: 'P R' },
+  CI: { en: 'C I' },
   JSON: { ko: '제이슨', en: 'Jason' },
   SQL: { ko: '에스큐엘', en: 'sequel' },
   SQLite: { ko: '에스큐엘라이트', en: 'S Q Lite' },
   macOS: { ko: '맥오에스', en: 'mac O S' },
   iOS: { ko: '아이오에스', en: 'i O S' },
   GitHub: { ko: '깃허브', en: 'GitHub' },
-  MCP: { ko: '엠씨피', en: 'M C P' },
-  VAD: { ko: '브이에이디', en: 'V A D' },
-  MLX: { ko: '엠엘엑스', en: 'M L X' },
+  MCP: { en: 'M C P' },
+  VAD: { en: 'V A D' },
+  MLX: { en: 'M L X' },
+  'Buyer Pilot': { ko: '바이어 파일럿' },
+  'Seed Pilot': { ko: '시드 파일럿' },
+  'Stock Pilot': { ko: '스톡 파일럿' },
+  'Vid Pilot': { ko: '비드 파일럿' },
+  Autopilot: { ko: '오토파일럿' },
+  DataForSEO: { ko: '데이터포 에스이오', en: 'Data for S E O' },
+  Qwen: { ko: '큐웬', en: 'Qwen' },
+  bottleneck: { ko: '보틀넥' },
+  bottlenecks: { ko: '보틀넥' },
 }
 
-const LETTER_KO: Record<string, string> = {
-  A: '에이', B: '비', C: '씨', D: '디', E: '이', F: '에프', G: '지', H: '에이치', I: '아이', J: '제이', K: '케이', L: '엘', M: '엠',
-  N: '엔', O: '오', P: '피', Q: '큐', R: '알', S: '에스', T: '티', U: '유', V: '브이', W: '더블유', X: '엑스', Y: '와이', Z: '지',
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** Apply phrase entries (with spaces) first, then single tokens; case-insensitive for phrases and lowercase keys. */
+function applyLexicon(text: string, lex: Record<string, { ko?: string; en?: string }>, lang: 'ko' | 'en'): string {
+  let s = text
+  for (const [term, v] of Object.entries(lex)) {
+    const spoken = v[lang]
+    if (!spoken || !term.includes(' ')) continue
+    s = s.replace(new RegExp(`(?<![A-Za-z])${escapeRe(term)}(?![A-Za-z])`, 'gi'), spoken)
+  }
+  const lower = Object.fromEntries(Object.entries(lex).filter(([k]) => k === k.toLowerCase()).map(([k, v]) => [k, v]))
+  return s.replace(/[A-Za-z][A-Za-z0-9]*/g, (w) => lex[w]?.[lang] ?? lower[w.toLowerCase()]?.[lang] ?? w)
 }
 
 // ---------------------------------------------------------------------------------------------- numbers
@@ -142,7 +165,7 @@ const ordinalEn = (d: number): string => `${d}${d % 10 === 1 && d !== 11 ? 'st' 
 // ---------------------------------------------------------------------------------------------- units
 
 const UNIT_KO: Record<string, string> = {
-  '%': '퍼센트', TB: '테라', GB: '기가', MB: '메가', KB: '킬로바이트', ms: '밀리초', GHz: '기가헤르츠', MHz: '메가헤르츠', kHz: '킬로헤르츠', Hz: '헤르츠',
+  '%': '퍼센트', TB: '테라바이트', GB: '기가바이트', MB: '메가바이트', KB: '킬로바이트', ms: '밀리초', GHz: '기가헤르츠', MHz: '메가헤르츠', kHz: '킬로헤르츠', Hz: '헤르츠',
   km: '킬로미터', cm: '센티미터', mm: '밀리미터', kg: '킬로그램', '°C': '도', '℃': '도', W: '와트', fps: '프레임', $: '달러', '₩': '원',
 }
 const UNIT_EN: Record<string, [string, string]> = {
@@ -220,9 +243,12 @@ export function applyPersona(text: string, lang: SpeechLang): string {
   return out.replace(/\s{2,}/g, ' ').trim()
 }
 
+/** 16.0 → 16, 0.50 → 0.5: trailing zeros are display formatting, not speech. */
+const trimDecimals = (text: string): string => text.replace(/(\d+)\.(\d*?)0+(?!\d)/g, (_, i: string, f: string) => (f ? `${i}.${f}` : i))
+
 function normalizeKo(text: string, koNumbers: 'hangul' | 'digits', lexicon: Record<string, { ko?: string; en?: string }>): string {
   const num = (s: string): string => (koNumbers === 'hangul' ? sinoKorean(s) : s.replace(/,/g, ''))
-  let s = text
+  let s = trimDecimals(text)
   // Dates: 2026-10-02 / 2026.10.02 / 2026/10/02
   s = s.replace(/\b(\d{4})[-./](\d{1,2})[-./](\d{1,2})\b/g, (_, y, m, d) => `${num(y)}년 ${MONTH_KO(Number(m))} ${num(String(Number(d)))}일`)
   s = s.replace(/(\d{1,2})월\s*(\d{1,2})일/g, (_, m, d) => `${MONTH_KO(Number(m))} ${num(String(Number(d)))}일`)
@@ -251,16 +277,15 @@ function normalizeKo(text: string, koNumbers: 'hangul' | 'digits', lexicon: Reco
   // Remaining numbers
   if (koNumbers === 'hangul') s = s.replace(/\d+(?:[.,]\d+)*/g, (n) => sinoKorean(n))
   // Lexicon (exact tokens), then remaining uppercase acronyms letter-by-letter.
-  const lex = { ...LEXICON, ...lexicon }
-  s = s.replace(/[A-Za-z][A-Za-z0-9]*/g, (w) => lex[w]?.ko ?? w)
-  s = s.replace(/\b[A-Z]{2,5}\b/g, (w) => [...w].map((c) => LETTER_KO[c] ?? c).join(''))
+  // Acronyms stay English (read cleanly as letters); only lexicon entries change.
+  s = applyLexicon(s, { ...LEXICON, ...lexicon }, 'ko')
   // Symbols
   s = s.replace(/\s*&\s*/g, ' 그리고 ').replace(/\s*\+\s*/g, ' 플러스 ').replace(/(\S)\s*\/\s*(\S)/g, '$1 $2')
   return s
 }
 
 function normalizeEn(text: string, lexicon: Record<string, { ko?: string; en?: string }>): string {
-  let s = text
+  let s = trimDecimals(text)
   s = s.replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, (_, y, m, d) => `${MONTH_EN[Number(m) - 1] ?? m} ${ordinalEn(Number(d))}, ${y}`)
   s = s.replace(/\b(\d{1,2}):(\d{2})\b/g, (_, h, m) => {
     const H = Number(h)
@@ -276,8 +301,7 @@ function normalizeEn(text: string, lexicon: Record<string, { ko?: string; en?: s
   s = s.replace(new RegExp(`${NUM}\\s*${UNIT_RE}(?![A-Za-z])`, 'g'), (_, n, u) => unit(n, u))
   s = s.replace(/\bv(\d+(?:\.\d+)*)\b/gi, (_, v: string) => `version ${v.split('.').join(' point ')}`)
   s = s.replace(/\b(\d)\b(?=\s+(?:items?|tasks?|agents?|steps?|issues?|files?|things?|decisions?))/g, (d) => EN_ONES[Number(d)] ?? d)
-  const lex = { ...LEXICON, ...lexicon }
-  s = s.replace(/[A-Za-z][A-Za-z0-9]*/g, (w) => lex[w]?.en ?? w)
+  s = applyLexicon(s, { ...LEXICON, ...lexicon }, 'en')
   // Remaining all-caps acronyms (not ordinary capitalised words) → spaced letters.
   s = s.replace(/\b[A-Z]{2,5}\b/g, (w) => (/^(I|OK|A|AM|PM)$/.test(w) ? w : [...w].join(' ')))
   s = s.replace(/\s*&\s*/g, ' and ').replace(/(\w)\s*\/\s*(\w)/g, '$1 or $2')

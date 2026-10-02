@@ -138,11 +138,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 /* ---- boot ---- */
 .boot { position: fixed; inset: 0; z-index: 8; pointer-events: none; }
-.boot .diag { position: absolute; left: 50%; top: calc(50% + min(28vh, 260px)); transform: translateX(-50%); display: grid; gap: 4px; font-size: 11px; letter-spacing: 0.18em; min-width: 320px; }
-.boot .diag div { display: flex; justify-content: space-between; gap: 30px; color: var(--ink-3); animation: fade .35s var(--ease); }
+.boot .diag { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); grid-template-columns: repeat(5, auto); column-gap: 44px; display: grid; gap: 4px; font-size: 11px; letter-spacing: 0.18em; min-width: 320px; }
+.boot .diag div { display: flex; justify-content: space-between; gap: 10px; color: var(--ink-3); animation: fade .35s var(--ease); }
 .boot .diag b { font-weight: 500; color: var(--ice); }
 .boot .diag b.off { color: var(--amber); }
-.boot .online { position: absolute; left: 50%; top: calc(50% - min(30vh, 290px)); transform: translateX(-50%); font-family: var(--display); font-size: 13px; letter-spacing: 0.6em; color: var(--ink); animation: online 1.2s var(--ease); white-space: nowrap; }
+.boot .online { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); font-family: var(--display); font-size: 13px; letter-spacing: 0.6em; color: var(--ink); animation: online 1.2s var(--ease); white-space: nowrap; }
 @keyframes online { from { opacity: 0; letter-spacing: 1.2em; } }
 
 /* ---- sheets: settings, dev, onboarding ---- */

@@ -56,6 +56,13 @@ export function VoiceLatency() {
   )
 }
 
+const MODEL_IDS: Record<VoiceQuality, string> = {
+  CINEMATIC: 'Qwen3-TTS-12Hz-1.7B-Base-bf16',
+  BALANCED: 'Qwen3-TTS-12Hz-1.7B-Base-bf16',
+  FAST: 'Qwen3-TTS-12Hz-0.6B-Base-bf16',
+}
+const quantOf = (id: string): string => (/(\d)bit/.test(id) ? `${/(\d)bit/.exec(id)![1]}-bit quantized` : /bf16|fp16/.test(id) ? 'bf16 — not quantized' : 'unknown precision')
+
 interface Take {
   label: string
   profile: string
@@ -89,7 +96,7 @@ export function VoiceLab() {
   const [seed, setSeed] = useState(1103)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [takes, setTakes] = useState<{ A: Take | null; B: Take | null }>({ A: null, B: null })
+  const [takes, setTakes] = useState<{ A: Take | null; B: Take | null; C: Take | null }>({ A: null, B: null, C: null })
   const [current, setCurrent] = useState<Take | null>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
 
@@ -121,7 +128,7 @@ export function VoiceLab() {
   const speak = () =>
     run('Generating…', async () => {
       // Same pipeline as production: SpeechPlanner → streaming sidecar → speech queue (mastering, Orb).
-      const plan = planSpeech(text, { lang: lang === 'auto' ? undefined : lang, koNumbers: cfg?.voice.koNumbers })
+      const plan = planSpeech(text, { lang: lang === 'auto' ? undefined : lang, koNumbers: cfg?.voice.koNumbers, lexicon: cfg?.voice.lexicon })
       const all: Float32Array[] = []
       let sr = 24000
       let first: number | null = null
@@ -178,6 +185,9 @@ export function VoiceLab() {
       <p className="note">
         Engine {health ? `${health.engine} · loaded ${health.loaded.join(', ') || 'nothing'} · RSS ${health.rss_mb} MB${health.mlx_active_mb !== undefined ? ` · MLX ${health.mlx_active_mb} MB (peak ${health.mlx_peak_mb})` : ''}` : 'sidecar not running — run scripts/setup-tts.sh, then Speak to start it'}
       </p>
+      <p className="note">
+        Weights {MODEL_IDS[mode]} · {quantOf(MODEL_IDS[mode])} · {health?.sample_rate ?? 24000} Hz · stream chunk {cfg?.voice.ttsChunkSeconds ?? 0.32} s · default voice {cfg?.voice.voiceProfile ?? '—'}
+      </p>
       <div className="row">
         <label>Model
           <select value={mode} onChange={(e) => setMode(e.target.value as VoiceQuality)}>
@@ -230,15 +240,21 @@ export function VoiceLab() {
           <div className="row">
             <button className="btn ghost" onClick={() => setTakes((t) => ({ ...t, A: { ...current, label: 'A' } }))}>Keep as A</button>
             <button className="btn ghost" onClick={() => setTakes((t) => ({ ...t, B: { ...current, label: 'B' } }))}>Keep as B</button>
+            <button className="btn ghost" onClick={() => setTakes((t) => ({ ...t, C: { ...current, label: 'C' } }))}>Keep as C</button>
           </div>
         </>
       )}
-      {(takes.A || takes.B) && (
+      {(takes.A || takes.B || takes.C) && (
         <div className="ab">
-          {(['A', 'B'] as const).map((k) => (
+          {(['A', 'B', 'C'] as const).map((k) => (
             <div key={k}>
               <b>{k}</b> {takes[k] ? `${takes[k]!.profile} · ${takes[k]!.mode}` : '—'}
               {takes[k] && <button className="btn ghost" onClick={() => replay(takes[k])}>Play {k}</button>}
+              {takes[k] && cfg && (
+                <button className="btn ghost" disabled={cfg.voice.voiceProfile === takes[k]!.profile} onClick={() => void c.saveConfig({ ...cfg, voice: { ...cfg.voice, voiceProfile: takes[k]!.profile, voiceQuality: takes[k]!.mode } })}>
+                  {cfg.voice.voiceProfile === takes[k]!.profile ? 'Preferred' : 'Use as my voice'}
+                </button>
+              )}
               {takes[k] && <MetricsTable take={takes[k]!} />}
             </div>
           ))}

@@ -53,10 +53,10 @@ describe('splitSentences', () => {
 describe('planSpeech — Korean', () => {
   it('normalizes telemetry with units, ratios, counters and acronyms', () => {
     const out = spoken('CPU 26%, RAM 16.5/32GB이고 task 3개 실행 중입니다.')
-    expect(out).toContain('씨피유 이십육 퍼센트')
-    expect(out).toContain('메모리 삼십이 기가 중 십육 점 오 기가')
+    expect(out).toContain('CPU 이십육 퍼센트') // acronyms stay English (measured: read cleanly)
+    expect(out).toContain('램 삼십이 기가바이트 중 십육 점 오 기가바이트')
     expect(out).toContain('세 개')
-    expect(out).not.toMatch(/\d|%|GB|CPU|RAM/)
+    expect(out).not.toMatch(/\d|%|GB|RAM/)
   })
   it('reads counters with native numbers and units with Sino numbers', () => {
     expect(spoken('진행 중인 작업은 2건입니다.')).toContain('두 건')
@@ -71,11 +71,11 @@ describe('planSpeech — Korean', () => {
   it('can leave Sino numbers as digits', () => {
     expect(spoken('사용률은 26%입니다.', { koNumbers: 'digits' })).toContain('26 퍼센트')
   })
-  it('keeps English technical terms inside Korean and transliterates acronyms', () => {
+  it('keeps English technical terms and acronyms inside Korean; loanwords only where measured', () => {
     const out = spoken('Buyer Pilot 분석을 완료했습니다. Search pipeline에서 두 가지 병목을 발견했습니다.')
-    expect(out).toContain('Buyer Pilot')
+    expect(out).toContain('바이어 파일럿') // mangled by the model in Korean context → loanword
     expect(out).toContain('Search pipeline에서')
-    expect(spoken('AOP Memory 연결됨, API 지연 120ms')).toContain('에이오피 Memory')
+    expect(spoken('AOP Memory 연결됨, API 지연 120ms')).toContain('AOP Memory')
   })
   it('first chunk is short; later sentences merge up to the chunk budget', () => {
     const plan = planSpeech('좋은 오후입니다. 현재 시스템은 정상적으로 작동하고 있습니다. 메모리 사용량은 안정적입니다. 진행 중인 작업은 두 건입니다.')
@@ -119,5 +119,44 @@ describe('planSpeech — English and mixed', () => {
   it('switches language per sentence in mixed replies', () => {
     const plan = planSpeech('AOP Memory is online. 관련된 이전 decision 세 건을 찾았습니다.')
     expect(plan.segments.map((s) => s.lang)).toEqual(['en', 'ko'])
+  })
+})
+
+describe('brief examples (AOP voice spec)', () => {
+  it.each([
+    ['32GB', '삼십이 기가바이트'],
+    ['16.5GB', '십육 점 오 기가바이트'],
+    ['26%', '이십육 퍼센트'],
+    ['0.0GB', '영 기가바이트'],
+    ['3건', '세 건'],
+  ])('%s → %s', (input, out) => expect(spoken(`${input}입니다.`)).toBe(`${out}입니다.`))
+
+  it('digits mode leaves Sino numbers as digits but still spells units', () => {
+    expect(spoken('32GB입니다.', { koNumbers: 'digits' })).toBe('32 기가바이트입니다.')
+  })
+
+  it.each(['API', 'CPU', 'GPU', 'Git', 'Docker', 'Claude', 'Codex', 'AOP'])('keeps %s English inside Korean', (term) => {
+    expect(spoken(`${term} 상태를 확인했습니다.`)).toContain(term)
+  })
+
+  it('applies a configurable lexicon (phrases and tokens) over the built-in one', () => {
+    expect(spoken('Buyer Pilot 상태를 확인했습니다.')).toContain('바이어 파일럿')
+    expect(spoken('Talkpic 분석 완료.', { lexicon: { Talkpic: { ko: '톡픽' } } })).toContain('톡픽')
+    expect(spoken('Claude 연결됨.', { lexicon: { Claude: { ko: '클로드' } } })).toContain('클로드')
+  })
+
+  it('segments by meaning: whole sentences, never word fragments', () => {
+    const plan = planSpeech('분석을 완료했습니다. 확인해야 할 항목이 세 가지 있습니다.')
+    expect(plan.segments.map((x) => x.text)).toEqual(['분석을 완료했습니다.', '확인해야 할 항목이 세 가지 있습니다.'])
+    const long = planSpeech('관련된 이전 기록을 확인했습니다. 원하시면 바로 이어서 진행하겠습니다. 메모리는 안정적인 상태이고, 진행 중인 작업은 두 건입니다.')
+    for (const seg of long.segments) expect(seg.text.split(' ').length).toBeGreaterThan(1)
+  })
+
+  it('English and mixed replies switch language per sentence', () => {
+    const plan = planSpeech('AOP Memory is online. 관련 decision 세 건을 확인했습니다.')
+    expect(plan.segments.map((x) => [x.lang, x.text])).toEqual([
+      ['en', 'A O P Memory is online.'],
+      ['ko', '관련 decision 세 건을 확인했습니다.'],
+    ])
   })
 })

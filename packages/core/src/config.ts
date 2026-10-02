@@ -47,7 +47,7 @@ const voiceSchema = z.object({
   ttsEngine: z.enum(['qwen3-mlx', 'macos-say']).default('qwen3-mlx'),
   /** CINEMATIC: 1.7B + in-context identity lock. BALANCED: 1.7B + x-vector. FAST: 0.6B. */
   voiceQuality: z.enum(['CINEMATIC', 'BALANCED', 'FAST']).default('CINEMATIC'),
-  voiceProfile: z.string().default('aop-core-a'),
+  voiceProfile: z.string().default('aop-core-d'),
   ttsPython: z.string().default('~/Library/Application Support/aop-jarvis/tts-venv/bin/python'),
   ttsServerScript: z.string().default('~/Library/Application Support/aop-jarvis/tts/aop_tts_server.py'),
   ttsPort: z.number().int().default(47821),
@@ -55,6 +55,8 @@ const voiceSchema = z.object({
   ttsIdleUnloadMin: z.number().nonnegative().default(30),
   /** Korean number reading: spell out (deterministic) or leave digits to the engine. */
   koNumbers: z.enum(['hangul', 'digits']).default('hangul'),
+  /** Pronunciation lexicon: term → spoken form per language (overrides the built-in table). */
+  lexicon: z.record(z.string(), z.object({ ko: z.string().optional(), en: z.string().optional() })).default({}),
   /** Post-synthesis mastering (high-pass, gentle EQ, light compression, limiter). */
   mastering: z.boolean().default(true),
   /** Spoken greeting after a cold boot only (never on ordinary wake). Empty = default per language. */

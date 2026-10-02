@@ -4,8 +4,11 @@ import { useController } from './shared'
 
 const FLAGS: [keyof DebugFlags, string][] = [
   ['layers', 'Show depth layers (exploded view)'],
+  ['ringIds', 'Show ring IDs'],
+  ['bounds', 'Show particle bounds'],
   ['bloom', 'Bloom'],
   ['particles', 'Particles'],
+  ['glass', 'Physical glass (transmission)'],
   ['freeze', 'Freeze animation'],
 ]
 

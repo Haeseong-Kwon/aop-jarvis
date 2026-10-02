@@ -6,6 +6,9 @@ import { disable as disableAutostart, enable as enableAutostart, isEnabled as au
 import { invoke } from '@tauri-apps/api/core'
 import { Microphone } from '../audio/mic'
 import { BootAudio, SpeechOutput } from '../audio/output'
+import { BootSound } from '../audio/bootSound'
+import { BOOT_TL } from '../orb/boot'
+import { timelineClock } from '@aop/core'
 import { store, type UiMode, type WindowMode } from '../store'
 import { createNativePort } from './native'
 import { openDatabase } from './sql'
@@ -22,6 +25,8 @@ export class Controller {
   readonly mic: Microphone
   readonly speech: SpeechOutput
   readonly bootAudio = new BootAudio()
+  private bootSound = new BootSound()
+  private cueRaf = 0
   readonly voice: VoiceSession
   private metricsTimer: ReturnType<typeof setInterval> | null = null
   private disposers: (() => void)[] = []
@@ -52,11 +57,12 @@ export class Controller {
       bus: rt.bus,
       handler: async (text, signal) => {
         const res = await rt.executive.handle(text, signal)
-        return { speech: res.response, lang: res.lang }
+        return { speech: res.speech, lang: res.lang }
       },
       wakeWordEnabled: () => rt.getConfig().voice.wakeWordEnabled,
-      bargeIn: () => rt.getConfig().voice.bargeIn,
-      planner: () => ({ koNumbers: rt.getConfig().voice.koNumbers }),
+      // The boot track plays through the speakers during the welcome; the mic must not take it for the user.
+      bargeIn: () => rt.getConfig().voice.bargeIn && !this.bootAudio.playing,
+      planner: () => ({ koNumbers: rt.getConfig().voice.koNumbers, lexicon: rt.getConfig().voice.lexicon }),
     })
     // One central audio timeline: the Orb and the UI react to these, not to private timers.
     this.speech.onActiveChange = (active) => {
@@ -183,8 +189,9 @@ export class Controller {
   /** Boot: real readiness checks run in parallel with the visual timeline; labels wait for real results. */
   async boot(opts: { silent?: boolean } = {}): Promise<void> {
     if (store.get().booting) return
-    store.set({ readiness: {}, bootStartedAt: performance.now() })
+    store.set({ readiness: {}, bootStartedAt: performance.now(), bootSkipAt: null })
     this.update({ booting: true, booted: false })
+    this.runBootCues()
     const cfg = this.rt.getConfig()
     this.silentBoot = !!opts.silent
     if (!this.silentBoot) void this.playBootAudio(cfg)
@@ -234,7 +241,7 @@ export class Controller {
     const cfg = this.rt.getConfig()
     void this.playBootAudio(cfg)
     this.replayBoot()
-    await new Promise((r) => setTimeout(r, 3400))
+    await new Promise((r) => setTimeout(r, BOOT_TL.duration * 1000))
     const greeted = await this.greet(true)
     setTimeout(() => this.bootAudio.fadeOut(cfg.boot.fadeOutMs), greeted ? GREETING_MUSIC_TAIL_MS : BOOT_AUDIO_TAIL_MS)
   }
@@ -257,9 +264,44 @@ export class Controller {
   /** Explicit cinematic command: replay the full assembly sequence (never used for ordinary wake). */
   replayBoot(): void {
     if (store.get().booting) return
-    store.set({ bootStartedAt: performance.now() })
+    store.set({ bootStartedAt: performance.now(), bootSkipAt: null })
     this.update({ booting: true })
-    setTimeout(() => this.update({ booting: false, booted: true }), 3400)
+    this.runBootCues(() => this.update({ booting: false, booted: true }))
+  }
+
+  /**
+   * One clock for everything: sound cues fire as the shared boot timeline crosses their markers
+   * (the renderer and overlay read the same timeline from the same clock).
+   */
+  private runBootCues(onDone?: () => void): void {
+    cancelAnimationFrame(this.cueRaf)
+    this.bootSound.begin()
+    let prev = -1
+    const tick = () => {
+      const s = store.get()
+      if (s.bootStartedAt === null) return
+      const t = timelineClock(performance.now(), s.bootStartedAt, s.bootSkipAt)
+      const skipping = s.bootSkipAt !== null
+      for (const cue of BOOT_TL.cuesBetween(prev, t)) {
+        if (cue.kind === 'event') this.rt.bus.emit('log', { ts: Date.now(), level: 'debug', msg: cue.name, ctx: { t: +t.toFixed(3) } })
+        // While skipping, keep only the structural cues so the accelerated remainder isn't a click storm.
+        else if (!skipping || cue.name === 'lockHeavy' || cue.name === 'ready') this.bootSound.play(cue.name)
+      }
+      prev = t
+      if (t < BOOT_TL.duration) this.cueRaf = requestAnimationFrame(tick)
+      else {
+        this.bootSound.end()
+        onDone?.()
+      }
+    }
+    this.cueRaf = requestAnimationFrame(tick)
+  }
+
+  /** User interaction during the cold boot: play the remainder fast and resolve to a clean final state. */
+  skipBoot(): void {
+    const s = store.get()
+    if (!s.booting || s.bootSkipAt !== null) return
+    store.set({ bootSkipAt: performance.now() })
   }
 
   setUiMode(mode: UiMode | 'ambient'): void {
@@ -319,7 +361,7 @@ export class Controller {
     if (!text.trim()) return
     if (this.voice.state === 'SPEAKING') this.speech.stop()
     const res = await this.rt.executive.handle(text.trim())
-    if (this.rt.getConfig().voice.enabled) void this.voice.speak(res.response, res.lang)
+    if (this.rt.getConfig().voice.enabled) void this.voice.speak(res.speech, res.lang)
   }
 
   /** Bring the window forward without changing what the voice session is doing. */
@@ -340,6 +382,7 @@ export class Controller {
   }
 
   wake(): void {
+    if (store.get().booting) return this.skipBoot()
     if (!store.get().booted) return
     if (!this.mic.active && this.rt.getConfig().voice.enabled) void this.startMic(this.rt.getConfig().voice.inputDeviceId)
     void this.warmVoice()

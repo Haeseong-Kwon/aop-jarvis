@@ -25,3 +25,4 @@ export { planSpeech, sinoKorean, nativeKorean, CACHEABLE_PHRASES, type SpeechPla
 export { SpeechCache } from './voice/cache'
 export { QwenSidecarTTS, pcmStream, type SidecarHealth, type SidecarMetrics, type VoiceQuality } from './voice/sidecar'
 export { FallbackTTS } from './voice/fallback'
+export { Timeline, timelineClock, EASE, type Segment, type Motion, type Cue } from './timeline'

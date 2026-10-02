@@ -30,6 +30,10 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 
 function useShortcuts(c: Controller) {
   useEffect(() => {
+    // Any interaction during the cold boot accelerates the rest of the assembly (never leaves it half-built).
+    const onAny = () => c.skipBoot()
+    window.addEventListener('pointerdown', onAny)
+    window.addEventListener('keydown', onAny)
     const onKey = (e: KeyboardEvent) => {
       if (!e.metaKey) {
         if (e.key === 'Escape' && store.get().voice !== 'IDLE') c.interrupt()
@@ -50,7 +54,11 @@ function useShortcuts(c: Controller) {
       }
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('pointerdown', onAny)
+      window.removeEventListener('keydown', onAny)
+    }
   }, [c])
 }
 

@@ -1,3 +1,4 @@
+import { timelineClock } from '@aop/core'
 import { useEffect, useRef } from 'react'
 import { emptyLevels } from '../audio/levels'
 import { store } from '../store'
@@ -34,7 +35,7 @@ export function Orb() {
         const m = s.metrics
         return {
           state: s.runtimeState,
-          bootT: s.booting && s.bootStartedAt !== null ? (performance.now() - s.bootStartedAt) / 1000 : null,
+          bootT: s.booting && s.bootStartedAt !== null ? timelineClock(performance.now(), s.bootStartedAt, s.bootSkipAt) : null,
           mic: controller.mic.active ? controller.mic.sample() : SILENT,
           out: controller.speech.sample(),
           agents: agentsCache,

@@ -5,9 +5,10 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 import type { AudioLevels } from '../audio/levels'
-import { BOOT_DONE, bootFrame, DEFAULT_TAU, EASE_TAU, lerpVisual, QUALITY, targetFps, VISUALS, type Quality, type Visual } from './params'
+import { DEFAULT_TAU, EASE_TAU, lerpVisual, QUALITY, targetFps, VISUALS, type Quality, type Visual } from './params'
 import { AOPOrbScene, DEFAULT_DEBUG, type AgentVisual, type DebugFlags, type Telemetry } from './scene'
 import * as S from './shaders'
+import { ASSEMBLED_T, BOOT_TL } from './boot'
 
 export { AGENT_SLOTS, ORBIT_RADIUS, type AgentVisual, type AgentVisualStatus, type DebugFlags, DEFAULT_DEBUG } from './scene'
 
@@ -192,7 +193,7 @@ export class OrbRenderer {
       this.bloomComposer.renderToScreen = false
       this.bloomComposer.setPixelRatio(this.dynamicRatio * preset.bloomScale)
       this.bloomComposer.addPass(new RenderPass(this.scene, this.camera))
-      this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w * preset.bloomScale, h * preset.bloomScale), preset.bloomStrength, 0.22, 1.25)
+      this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w * preset.bloomScale, h * preset.bloomScale), preset.bloomStrength, 0.3, 0.55)
       this.bloomComposer.addPass(this.bloomPass)
       this.bloomComposer.setSize(w, h)
     }
@@ -256,7 +257,9 @@ export class OrbRenderer {
     this.visual = this.snapNext ? { ...VISUALS[state] } : lerpVisual(this.visual, VISUALS[state], 1 - Math.exp(-realDt / tau))
     this.snapNext = false
     const v = this.visual
-    const boot = inputs.bootT !== null ? bootFrame(inputs.bootT) : BOOT_DONE
+    const bootT = inputs.bootT ?? ASSEMBLED_T
+    const coreUp = Math.min(1, 0.3 * BOOT_TL.p('core.point', bootT) + 0.7 * BOOT_TL.p('lens.glass', bootT))
+    const flare = Math.sin(Math.PI * BOOT_TL.raw('core.flare', bootT))
 
     // Output audio → features with speech-like attack/release (fast up, smooth decay). Speech onset ignites.
     const b = inputs.out.bands
@@ -297,14 +300,14 @@ export class OrbRenderer {
     this.orb.explode(this.explode, v.depth)
 
     ;(this.bg.material.uniforms.uTint!.value as THREE.Color).setRGB(v.tint[0], v.tint[1], v.tint[2])
-    this.bg.material.uniforms.uLift!.value = v.nucleus * boot.core
+    this.bg.material.uniforms.uLift!.value = v.nucleus * coreUp
 
     this.orb.update({
       time: this.time,
       dt,
       v,
-      boot,
-      out: { ...env, bands: inputs.out.bands },
+      bootT,
+      out: env,
       mic: { level: micLevel, bands: inputs.mic.bands },
       ignite: this.ignite,
       scanAngle: this.scanAngle,
@@ -317,7 +320,7 @@ export class OrbRenderer {
 
     const cu = this.compositePass.uniforms
     cu.uTime!.value = this.time
-    cu.uStreak!.value = this.preset().streak ? 0.03 + boot.flare * 0.25 + this.ignite * 0.05 : 0
+    cu.uStreak!.value = this.preset().streak ? 0.03 + flare * 0.25 + this.ignite * 0.05 : 0
   }
 
   /** Selective bloom: only objects tagged 'bloom' emit; opaque structure occludes as black; the rest is hidden. */

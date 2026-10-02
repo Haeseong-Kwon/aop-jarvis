@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createRuntime } from '../src/runtime'
+import { planSpeech } from '../src/voice/planner'
 import { fakeNative, memoryDb, ok, type FakeNative } from './helpers'
 
 const PROJECT = '/Users/test/code/buyer-pilot'
@@ -46,6 +47,9 @@ describe('acceptance scenarios', () => {
     expect(native.calls.some((c) => c.program === '/usr/bin/open' && c.args.join(' ') === '-a Google Chrome')).toBe(true)
     expect(native.calls.some((c) => c.program === CLAUDE)).toBe(false)
     expect(res.tasks.map((t) => t.agent)).toEqual(['operator'])
+    // Screen shows the full result; JARVIS just acknowledges.
+    expect(res.response).toContain('Google Chrome')
+    expect(res.speech).toBe('네.')
   })
 
   it('C: "현재 메모리 상태 확인해." → system tool → real metrics, no model', async () => {
@@ -53,6 +57,9 @@ describe('acceptance scenarios', () => {
     const rt = await runtime(native)
     const res = await rt.executive.handle('현재 메모리 상태 확인해.')
     expect(res.response).toContain('32GB 중 14.0GB')
+    // Display text ≠ spoken text: full sentences, zero swap said as none.
+    expect(res.speech).toBe('메모리는 32GB 중 14.0GB를 사용하고 있습니다. 현재 메모리 압박은 정상이고, 스왑 사용량은 없습니다.')
+    expect(planSpeech(res.speech).segments.map((x) => x.text).join(' ')).toBe('메모리는 삼십이 기가바이트 중 십사 기가바이트를 사용하고 있습니다. 현재 메모리 압박은 정상이고, 스왑 사용량은 없습니다.')
     expect(res.tier).toBe('L0')
     expect(native.calls.some((c) => c.program === CLAUDE)).toBe(false)
   })
@@ -118,6 +125,7 @@ describe('acceptance scenarios', () => {
     const rt = await runtime(native)
     const res = await rt.executive.handle('안녕 자비스')
     expect(res.response).toContain('model reply')
+    expect(res.speech).toBe(res.response) // no spoken override → say what is shown
     expect(res.tier).toBe('L1')
     expect((await rt.ledger.summary()).todayUsd).toBeCloseTo(0.002)
   })

@@ -1,6 +1,7 @@
 import type { Subsystem } from '@aop/core'
 import { useEffect, useRef, useState } from 'react'
-import { BOOT } from '../orb/params'
+import { timelineClock } from '@aop/core'
+import { BOOT } from '../orb/boot'
 import { store, useUi } from '../store'
 import { useController } from './shared'
 
@@ -135,7 +136,7 @@ export function BootOverlay() {
     completed.current = false
     let raf = 0
     const tick = () => {
-      setT((performance.now() - startedAt) / 1000)
+      setT(timelineClock(performance.now(), startedAt, store.get().bootSkipAt))
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)

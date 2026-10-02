@@ -23,23 +23,23 @@ export class OperatorAgent implements Agent {
       switch (task.type) {
         case 'launch_app': {
           await run.tool('apps.open', { app: i.app })
-          return run.done(t(lang, `${i.app} 실행했습니다.`, `${i.app} is open.`))
+          return run.done(t(lang, `${i.app} 실행했습니다.`, `${i.app} is open.`), { speech: t(lang, '네.', 'Sure.') })
         }
         case 'quit_app': {
           await run.tool('apps.quit', { app: i.app })
-          return run.done(t(lang, `${i.app} 종료했습니다.`, `Quit ${i.app}.`))
+          return run.done(t(lang, `${i.app} 종료했습니다.`, `Quit ${i.app}.`), { speech: t(lang, '네.', 'Sure.') })
         }
         case 'system_metrics': {
           const m = await run.tool<SystemMetrics>('system.metrics', {})
-          return run.done(metricsSentence(m, lang, i.focus === 'memory'), { data: m, artifacts: [{ kind: 'metrics', title: 'System metrics', content: describeMetrics(m) }] })
+          return run.done(metricsSentence(m, lang, i.focus === 'memory'), { speech: metricsSpeech(m, lang, i.focus === 'memory'), data: m, artifacts: [{ kind: 'metrics', title: 'System metrics', content: describeMetrics(m) }] })
         }
         case 'volume': {
           const o = await run.tool<{ from: number; to: number }>('system.volume', { level: i.level, delta: i.delta })
-          return run.done(t(lang, `볼륨 ${o.to}%로 맞췄습니다.`, `Volume set to ${o.to}%.`))
+          return run.done(t(lang, `볼륨 ${o.to}%로 맞췄습니다.`, `Volume set to ${o.to}%.`), { speech: t(lang, '네.', 'Sure.') })
         }
         case 'media': {
           await run.tool('media.control', { action: i.action })
-          return run.done(t(lang, '음악을 제어했습니다.', `Music: ${String(i.action)}.`))
+          return run.done(t(lang, '음악을 제어했습니다.', `Music: ${String(i.action)}.`), { speech: t(lang, '네.', 'Sure.') })
         }
         case 'clipboard_read': {
           const o = await run.tool<{ text: string }>('clipboard.read', {})
@@ -54,7 +54,7 @@ export class OperatorAgent implements Agent {
         }
         case 'trash_path': {
           const o = await run.tool<{ trashed: string }>('fs.trash', { path: i.path })
-          return run.done(t(lang, `${o.trashed}을(를) 휴지통으로 옮겼습니다.`, `Moved ${o.trashed} to the Trash.`))
+          return run.done(t(lang, `${o.trashed}을(를) 휴지통으로 옮겼습니다.`, `Moved ${o.trashed} to the Trash.`), { speech: t(lang, '휴지통으로 옮겼습니다.', 'Moved to the Trash.') })
         }
         case 'git_status': {
           const o = await run.tool<{ branch: string; changed: string[]; recent: string[] }>('git.status', { cwd: i.cwd })
@@ -76,6 +76,23 @@ export class OperatorAgent implements Agent {
       return run.fail(error)
     }
   }
+}
+
+/** Spoken telemetry: full sentences (units are spelled by the SpeechPlanner); zero swap is said as "none". */
+export function metricsSpeech(m: SystemMetrics, lang: 'ko' | 'en', memoryFocus: boolean): string {
+  const used = (m.memUsedBytes / GB).toFixed(1)
+  const total = (m.memTotalBytes / GB).toFixed(0)
+  const pct = Math.round((m.memUsedBytes / m.memTotalBytes) * 100)
+  const swapGb = m.swapUsedBytes / GB
+  const pressureKo = pct > 90 ? '높고' : pct > 75 ? '다소 높은 편이고' : '정상이고'
+  const pressureEn = pct > 90 ? 'high' : pct > 75 ? 'somewhat elevated' : 'normal'
+  const swapKo = swapGb < 0.05 ? '스왑 사용량은 없습니다.' : `스왑은 ${swapGb.toFixed(1)}GB를 사용 중입니다.`
+  const swapEn = swapGb < 0.05 ? 'and no swap is in use.' : `and swap is at ${swapGb.toFixed(1)}GB.`
+  if (memoryFocus) {
+    return t(lang, `메모리는 ${total}GB 중 ${used}GB를 사용하고 있습니다. 현재 메모리 압박은 ${pressureKo}, ${swapKo}`, `You're using ${used} of ${total}GB of memory. Pressure is ${pressureEn}, ${swapEn}`)
+  }
+  const battery = m.battery ? t(lang, ` 배터리는 ${Math.round(m.battery.percent)}%입니다.`, ` Battery is at ${Math.round(m.battery.percent)}%.`) : ''
+  return t(lang, `CPU 사용률은 ${m.cpuPercent.toFixed(0)}%, 메모리는 ${pct}%를 사용하고 있습니다.${battery}`, `CPU is at ${m.cpuPercent.toFixed(0)}% and memory at ${pct}%.${battery}`)
 }
 
 function metricsSentence(m: SystemMetrics, lang: 'ko' | 'en', memoryFocus: boolean): string {

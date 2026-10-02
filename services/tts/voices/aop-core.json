@@ -1,7 +1,7 @@
 {
   "version": 1,
   "note": "Original AOP voice identity. Candidates are described, never cloned from a real person. Each candidate's reference clip is generated once with Qwen3-TTS VoiceDesign (fixed seed) and then locked: runtime speech uses the Base model conditioned on that clip, so the identity is stable across responses. Re-running design with a different seed creates a different voice — bump the id when you do.",
-  "default": "aop-core-a",
+  "default": "aop-core-d",
   "candidates": [
     {
       "id": "aop-core-a",
@@ -13,7 +13,7 @@
       "temperature": 0.7,
       "top_p": 0.9,
       "repetition_penalty": 1.05,
-      "notes": "Primary candidate: restrained, authoritative, lowest energy."
+      "notes": "Retired as default: reproducibly drops the second sentence of an English reply (measured, docs/VOICE_AUDIT.md)."
     },
     {
       "id": "aop-core-b",
@@ -38,6 +38,42 @@
       "top_p": 0.88,
       "repetition_penalty": 1.05,
       "notes": "Most 'machine' identity; check that it stays natural, not robotic."
+    },
+    {
+      "id": "aop-core-d",
+      "name": "AOP CORE D — calm authority (brief A)",
+      "instruct": "A mature adult male AI assistant with a low-mid register and calm authority. Extremely precise pronunciation and measured conversational pacing. Clean, dry studio sound with no reverb. Subtle warmth and controlled emotional expression; sophisticated and intelligent, never theatrical or exaggerated. English carries a polished, subtly British-leaning international accent; Korean is natural and native-sounding with clean sentence-final intonation.",
+      "ref_text": "좋은 오후입니다. 현재 시스템은 정상적으로 작동하고 있습니다. Good evening. All systems are operational, and I'll keep you informed.",
+      "ref_lang": "ko",
+      "seed": 4409,
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "repetition_penalty": 1.05,
+      "notes": "Default (audit 2026-10-02): complete output on every test line, calm 4.1 syl/s, low-mid pitch, best mixed-language proxy."
+    },
+    {
+      "id": "aop-core-e",
+      "name": "AOP CORE E — quiet confidence (brief B)",
+      "instruct": "A calm adult male synthetic intelligence voice, slightly deeper than average, with quiet confidence. Restrained and composed, with high articulation and short deliberate pauses. Natural, fluent Korean and English. A premium cinematic presence without sounding like a narrator or an announcer. Close-mic studio recording, no reverb, minimal breathiness.",
+      "ref_text": "좋은 오후입니다. 현재 시스템은 정상적으로 작동하고 있습니다. Good evening. All systems are operational, and I'll keep you informed.",
+      "ref_lang": "ko",
+      "seed": 5503,
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "repetition_penalty": 1.05,
+      "notes": "Not recommended: dropped the second sentence of a Korean reply in the audit."
+    },
+    {
+      "id": "aop-core-f",
+      "name": "AOP CORE F — sophisticated analytic (brief C)",
+      "instruct": "A sophisticated male digital assistant with a smooth low-mid tone and precise diction. Minimal breathiness, analytical but warm. Subtle international English character with a faint British refinement, and natural bilingual Korean-English delivery. High-end cinematic AI presence that remains conversational, never dramatic, never cartoon-like. Clean studio sound without reverb.",
+      "ref_text": "좋은 오후입니다. 현재 시스템은 정상적으로 작동하고 있습니다. Good evening. All systems are operational, and I'll keep you informed.",
+      "ref_lang": "ko",
+      "seed": 6607,
+      "temperature": 0.68,
+      "top_p": 0.9,
+      "repetition_penalty": 1.05,
+      "notes": "Brief candidate C."
     }
   ]
 }

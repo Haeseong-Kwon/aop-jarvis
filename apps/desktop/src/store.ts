@@ -31,6 +31,8 @@ export interface UiState {
   booted: boolean
   booting: boolean
   bootStartedAt: number | null
+  /** performance.now() when the user skipped the cold boot (remainder plays accelerated). */
+  bootSkipAt: number | null
   sleeping: boolean
   readiness: Partial<Record<Subsystem, { ok: boolean; detail: string; at: number }>>
   tasks: Record<string, Task>
@@ -70,6 +72,7 @@ export const initialState: UiState = {
   booted: false,
   booting: false,
   bootStartedAt: null,
+  bootSkipAt: null,
   sleeping: false,
   readiness: {},
   tasks: {},
