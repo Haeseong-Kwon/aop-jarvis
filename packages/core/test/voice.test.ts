@@ -94,7 +94,7 @@ describe('VoiceSession lifecycle', () => {
     h.finishPlayback()
     await pending
     expect(h.handled).toEqual(['open chrome'])
-    expect(h.states).toEqual(['TRANSCRIBING', 'LISTENING', 'TRANSCRIBING', 'THINKING', 'SPEAKING', 'LISTENING'])
+    expect(h.states).toEqual(['LISTENING', 'TRANSCRIBING', 'THINKING', 'SPEAKING', 'LISTENING']) // the idle wake check itself is silent
   })
 
   it('runs a command spoken together with the wake word', async () => {

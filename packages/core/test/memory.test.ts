@@ -58,3 +58,12 @@ describe('MemoryStore', () => {
     expect(MemoryStore.diagnostics(hits)[0]).toHaveProperty('reasons.keyword')
   })
 })
+
+describe('migrations', () => {
+  it('are idempotent when re-run over a partially migrated database', async () => {
+    const db = memoryDb()
+    await migrate(db)
+    await db.execute('DELETE FROM schema_version') // simulate a crash before the version write
+    await expect(migrate(db)).resolves.toBe(1)
+  })
+})

@@ -140,7 +140,8 @@ export class VoiceSession {
     if (samples16k.length < MIN_UTTERANCE_SAMPLES) return this.armFollowUpIfListening()
     const wasIdle = this._state === 'IDLE'
     if (wasIdle && !this.d.wakeWordEnabled()) return
-    this.set('TRANSCRIBING')
+    // A wake-word check on ambient speech stays silent; only a real command turn shows TRANSCRIBING.
+    if (!wasIdle) this.set('TRANSCRIBING')
     let text: string
     try {
       text = (await this.d.stt.transcribe(samples16k)).trim()
@@ -150,7 +151,7 @@ export class VoiceSession {
     }
     if (wasIdle) {
       const m = this.d.wake.match(text)
-      if (!m.woke) return this.set('IDLE')
+      if (!m.woke) return
       this.d.bus.emit('voice:transcript', { text, final: true })
       if (!m.command) {
         this.set('LISTENING')
@@ -221,10 +222,11 @@ export class VoiceSession {
 
   private armFollowUp(ms = this.d.followUpMs ?? DEFAULT_FOLLOW_UP_MS): void {
     this.clearFollowUp()
-    const set = this.d.setTimer ?? setTimeout
-    this.followUpTimer = set(() => {
+    const fire = () => {
       if (this._state === 'LISTENING' || this._state === 'ERROR' || this._state === 'INTERRUPTED') this.set('IDLE')
-    }, ms)
+    }
+    // DOM and Node disagree on setTimeout's return type; the handle is opaque either way.
+    this.followUpTimer = this.d.setTimer ? this.d.setTimer(fire, ms) : (setTimeout(fire, ms) as ReturnType<typeof setTimeout>)
   }
 
   private clearFollowUp(): void {

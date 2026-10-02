@@ -54,7 +54,10 @@ export class CodeAgent implements Agent {
     } catch (error) {
       run.errors.push(`analysis model unavailable: ${errorMessage(error)}`)
     }
-    const summary = t(run.lang, `${report.fileCount}개 파일 분석, 구조적 문제 ${findings.length}건`, `Analyzed ${report.fileCount} files, ${findings.length} structural findings`)
+    // The summary must agree with the findings it summarizes (the reviewer checks this).
+    const summary = analysis
+      ? t(run.lang, `${report.fileCount}개 파일 분석 완료 — 문제점을 정리했습니다`, `Analyzed ${report.fileCount} files — findings below`)
+      : t(run.lang, `${report.fileCount}개 파일 구조 검사, 휴리스틱 문제 ${findings.length}건 (모델 분석 없음)`, `Inspected ${report.fileCount} files, ${findings.length} heuristic findings (no model analysis)`)
     return run.done(summary, {
       data: report,
       artifacts: [

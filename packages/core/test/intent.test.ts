@@ -59,3 +59,10 @@ describe('intent engine (L0/L1, no model)', () => {
     expect(classify('how should I design a multi-tenant architecture with tradeoffs?').tier).toBe('L3')
   })
 })
+
+import { topLevelBullets } from '../src/agents/reasoning'
+describe('reviewer verdict parsing', () => {
+  it('keeps top-level issues and folds nested detail into them', () => {
+    expect(topLevelBullets('- • **A**: bad\n  - detail one\n- B is wrong\n*Fix*: do X')).toEqual(['**A**: bad detail one', 'B is wrong *Fix*: do X'])
+  })
+})

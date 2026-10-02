@@ -64,6 +64,18 @@ export class CommunicatorAgent implements Agent {
   }
 }
 
+export function topLevelBullets(text: string): string[] {
+  const out: string[] = []
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    const top = /^[-*•]\s+/.test(line) || /^\d+[.)]\s+/.test(line)
+    const clean = line.replace(/^\s*([-*•]|\d+[.)])\s+/, '').replace(/^[-*•]\s+/, '').trim()
+    if (top || out.length === 0) out.push(clean)
+    else out[out.length - 1] += ` ${clean}`
+  }
+  return out
+}
+
 /** Verifies upstream work: failures, empty output, failing tests, and (when a model is available) contradictions. */
 export class ReviewerAgent implements Agent {
   readonly id = 'reviewer' as const
@@ -94,7 +106,8 @@ export class ReviewerAgent implements Agent {
           `Request: ${String(task.input.request)}\n\nWork:\n${content.slice(0, 30_000)}`,
           { complexity: 0.4, contextChars: content.length },
         )
-        if (!/^\s*ok\b/i.test(verdict)) issues.push(...verdict.split('\n').map((l) => l.replace(/^[-*]\s*/, '').trim()).filter(Boolean))
+        // Keep top-level bullets only; nested detail stays attached to its issue.
+        if (!/^\s*ok\b/i.test(verdict)) issues.push(...topLevelBullets(verdict))
       }
     } catch (error) {
       if (error instanceof JarvisError && error.code === 'CANCELLED') throw error

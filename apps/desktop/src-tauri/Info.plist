@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>AOP JARVIS listens for its wake word and your voice commands. Audio is processed locally on this Mac.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>AOP JARVIS controls apps (volume, music, quitting apps) when you ask it to.</string>
+</dict>
+</plist>

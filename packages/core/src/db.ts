@@ -7,46 +7,47 @@ export interface SqlDriver {
   select<T>(sql: string, params?: SqlValue[]): Promise<T[]>
 }
 
-/** Append-only. Never edit a shipped migration; add a new one. */
+/** Append-only. Never edit a shipped migration; add a new one. Statements must be idempotent (IF NOT EXISTS)
+ * so a crash or a concurrent first launch mid-migration can simply re-run. */
 export const MIGRATIONS: string[] = [
-  `CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
-   CREATE TABLE sources (
+   CREATE TABLE IF NOT EXISTS sources (
      id TEXT PRIMARY KEY, type TEXT NOT NULL, uri TEXT, title TEXT NOT NULL,
      content TEXT NOT NULL, created_at INTEGER NOT NULL);
 
-   CREATE TABLE memories (
+   CREATE TABLE IF NOT EXISTS memories (
      id TEXT PRIMARY KEY, type TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL,
      entities TEXT NOT NULL DEFAULT '[]', project TEXT, importance REAL NOT NULL DEFAULT 0.5,
      confidence REAL NOT NULL DEFAULT 0.8, source_id TEXT REFERENCES sources(id),
      source_type TEXT, embedding TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
      last_accessed_at INTEGER);
-   CREATE INDEX memories_project ON memories(project, type);
+   CREATE INDEX IF NOT EXISTS memories_project ON memories(project, type);
 
-   CREATE VIRTUAL TABLE memories_fts USING fts5(id UNINDEXED, title, content, entities, project);
+   CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(id UNINDEXED, title, content, entities, project);
 
-   CREATE TABLE relations (
+   CREATE TABLE IF NOT EXISTS relations (
      id TEXT PRIMARY KEY, from_id TEXT NOT NULL, to_id TEXT NOT NULL, type TEXT NOT NULL,
      created_at INTEGER NOT NULL, UNIQUE(from_id, to_id, type));
 
-   CREATE TABLE usage (
+   CREATE TABLE IF NOT EXISTS usage (
      id TEXT PRIMARY KEY, ts INTEGER NOT NULL, request_id TEXT, provider TEXT NOT NULL,
      model TEXT NOT NULL, tier TEXT NOT NULL, input_tokens INTEGER NOT NULL,
      output_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL, latency_ms INTEGER NOT NULL,
      cache_hit INTEGER NOT NULL, reason TEXT, agent TEXT, task_id TEXT, project TEXT);
-   CREATE INDEX usage_ts ON usage(ts);
+   CREATE INDEX IF NOT EXISTS usage_ts ON usage(ts);
 
-   CREATE TABLE audit (
+   CREATE TABLE IF NOT EXISTS audit (
      id TEXT PRIMARY KEY, ts INTEGER NOT NULL, request_id TEXT, task_id TEXT, agent TEXT,
      tool TEXT NOT NULL, input_summary TEXT NOT NULL, result TEXT NOT NULL, risk TEXT NOT NULL,
      approval TEXT NOT NULL, duration_ms INTEGER NOT NULL);
-   CREATE INDEX audit_ts ON audit(ts);
+   CREATE INDEX IF NOT EXISTS audit_ts ON audit(ts);
 
-   CREATE TABLE requests (
+   CREATE TABLE IF NOT EXISTS requests (
      id TEXT PRIMARY KEY, ts INTEGER NOT NULL, session_id TEXT NOT NULL, text TEXT NOT NULL,
      intent TEXT, tier TEXT, response TEXT, ok INTEGER);
 
-   CREATE TABLE tasks (
+   CREATE TABLE IF NOT EXISTS tasks (
      id TEXT PRIMARY KEY, request_id TEXT NOT NULL, agent TEXT NOT NULL, title TEXT NOT NULL,
      status TEXT NOT NULL, json TEXT NOT NULL, updated_at INTEGER NOT NULL);`,
 ]

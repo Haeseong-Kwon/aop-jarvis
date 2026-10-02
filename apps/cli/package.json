@@ -1,0 +1,21 @@
+{
+  "name": "@aop/cli",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "jarvis": "./src/main.ts"
+  },
+  "scripts": {
+    "jarvis": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aop/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.3"
+  }
+}

@@ -62,7 +62,8 @@ export class ContextBroker {
     private readonly log: Logger,
   ) {
     bus.on('task:updated', ({ task }) => {
-      this.state.currentTask = task.status === 'RUNNING' ? task.title : this.state.currentTask
+      if (task.status === 'RUNNING') this.state.currentTask = task.title
+      else if (this.state.currentTask === task.title) this.state.currentTask = null
       this.state.recentTasks = [{ id: task.id, title: task.title, status: task.status }, ...this.state.recentTasks.filter((t) => t.id !== task.id)].slice(0, MAX_RECENT)
     })
     bus.on('tool:result', (r) => {
@@ -82,7 +83,9 @@ export class ContextBroker {
     }
     if (cfg.trackActiveApp) {
       try {
-        this.state.activeApp = (await this.native.frontmostApp())?.name ?? null
+        // JARVIS itself is frontmost while you talk to it; keep the app you were last working in.
+        const front = await this.native.frontmostApp()
+        if (front && front.bundleId !== 'com.aop.jarvis' && !['aop-jarvis', 'AOP JARVIS'].includes(front.name)) this.state.activeApp = front.name
       } catch (error) {
         this.log.debug('frontmost app unavailable', { error: errorMessage(error) })
       }
