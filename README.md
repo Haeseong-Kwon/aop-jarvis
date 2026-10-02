@@ -1,6 +1,6 @@
 # AOP JARVIS
 
-AOP JARVIS is a local-first personal AI layer for macOS. A Tauri 2 desktop app wraps a pure-TypeScript runtime (`@aop/core`) that classifies each request, runs known commands natively (L0, no model), and routes the rest to the cheapest sufficient model tier. It delegates work to six capability agents through a task DAG, gates risky actions behind explicit approval, and keeps a local SQLite memory with source provenance. The interface centers on a realtime WebGL **AOP Orb** derived from the AOP logo, which renders the runtime's actual state.
+AOP JARVIS is a local-first personal AI layer for macOS. A Tauri 2 desktop app wraps a pure-TypeScript runtime (`@aop/core`) that classifies each request, runs known commands natively (L0, no model), and routes the rest to the cheapest sufficient model tier. It delegates work to six capability agents through a task DAG, gates risky actions behind explicit approval, and keeps a local SQLite memory with source provenance. The interface centers on a realtime WebGL **AOP Orb** — a 3D optical instrument built from the AOP logo (machined O housing with a lens barrel, iris and stacked glass, A/P structural plates, precision HUD) — which renders the runtime's actual state. JARVIS speaks with an original local voice (Qwen3-TTS on MLX) through a streaming, interruptible speech pipeline.
 
 ## What works today
 
@@ -22,7 +22,9 @@ Also verified live:
 - Agent nodes driven by real tasks.
 - Developer panel.
 
-**Voice (A, G):** implemented end to end. The code path is mic → energy VAD → whisper.cpp → transcript wake word → runtime → macOS TTS, with barge-in. Speech output and Orb sync were observed live (scenario C). The wake → listen → think → speak → interrupt lifecycle is covered by unit tests. Real STT and wake-word matching were verified on synthesized Korean and English speech run through the production whisper.cpp provider (about 300–400 ms per utterance on an M5). A full acoustic round trip through the live microphone, and barge-in with a real voice, were **not** verified: echo cancellation removes the Mac's own speaker output, so they can't be self-tested.
+**Graphics/voice overhaul (this branch):** see [Orb](docs/ORB.md), [Voice](docs/VOICE.md) and [Benchmarks](docs/BENCHMARKS.md). The Orb rebuild was rendered and inspected (software GL); the Qwen3-TTS voice is implemented and protocol-tested but **has not been generated or heard yet** — that requires the Mac (`scripts/setup-tts.sh`, then `audition.py`).
+
+**Voice (A, G):** implemented end to end. The code path is mic → energy VAD / echo gate → whisper.cpp → transcript wake word → runtime → SpeechPlanner → Qwen3-TTS sidecar (streaming; macOS speech as fallback) → gapless speech queue, with barge-in. Speech output and Orb sync were observed live (scenario C). The wake → listen → think → speak → interrupt lifecycle is covered by unit tests. Real STT and wake-word matching were verified on synthesized Korean and English speech run through the production whisper.cpp provider (about 300–400 ms per utterance on an M5). A full acoustic round trip through the live microphone, and barge-in with a real voice, were **not** verified: echo cancellation removes the Mac's own speaker output, so they can't be self-tested.
 
 ## Requirements
 
@@ -39,12 +41,14 @@ Also verified live:
 ```bash
 pnpm install
 scripts/setup-voice.sh            # brew install whisper-cpp + ggml-small-q5_1 (~190 MB)
+scripts/setup-tts.sh              # AOP voice: Qwen3-TTS (MLX) venv + sidecar + models (~9 GB)
 pnpm dev                          # tauri dev (desktop app)
 pnpm build                        # tauri build → .app / .dmg
 pnpm --filter @aop/cli jarvis "현재 메모리 상태 확인해"   # headless runtime
 pnpm --filter @aop/cli jarvis --status
 pnpm test                         # vitest (core)
 pnpm check                        # typecheck + tests + cargo check
+node scripts/capture-orb.mjs docs/captures/after   # Orb visual-regression captures (needs `pnpm --filter desktop dev`)
 ```
 
 `mise run setup|dev|test|check|build` wraps the same commands.
@@ -57,9 +61,10 @@ The first launch shows onboarding. Each check there is a real probe and comes wi
 apps/desktop/          Tauri app: React HUD, Orb renderer, audio, host adapters
 apps/desktop/src-tauri Rust native layer (process, telemetry, files, Keychain, tray)
 apps/cli/              Headless JARVIS on Node (same runtime, shared DB)
-packages/core/         Runtime: router, memory, tools, agents, orchestrator, voice state machine
+packages/core/         Runtime: router, memory, tools, agents, orchestrator, voice state machine, SpeechPlanner
+services/tts/          Local TTS sidecar (Qwen3-TTS via mlx-audio), voice candidates, audition/benchmark
 assets/aop-mark.svg    AOP mark reconstructed from the logo (generated)
-scripts/               setup-voice.sh, gen-mark-svg.ts
+scripts/               setup-voice.sh, setup-tts.sh, capture-orb.mjs, gen-mark-svg.ts
 docs/                  Architecture and subsystem docs
 ```
 
@@ -73,5 +78,6 @@ docs/                  Architecture and subsystem docs
 - [Tools](docs/TOOLS.md)
 - [Permissions](docs/PERMISSIONS.md)
 - [Orb](docs/ORB.md)
+- [Benchmarks](docs/BENCHMARKS.md)
 - [AOP Note integration](docs/AOP_NOTE_INTEGRATION.md)
 - [Development](docs/DEVELOPMENT.md)

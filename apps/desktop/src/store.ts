@@ -1,7 +1,10 @@
-import type { ApprovalRequest, JarvisConfig, LogEntry, RetrievalDiagnostic, RuntimeState, Subsystem, SystemMetrics, Task, Tier, UsageRecord, VoiceState } from '@aop/core'
+import type { ApprovalRequest, JarvisConfig, LatencyStage, LogEntry, RetrievalDiagnostic, RuntimeState, Subsystem, SystemMetrics, Task, Tier, UsageRecord, VoiceState } from '@aop/core'
+import { DEFAULT_DEBUG, type DebugFlags, type OrbStats } from './orb/renderer'
 import { useSyncExternalStore } from 'react'
 
 export type WindowMode = 'ambient' | 'expanded' | 'cinematic'
+/** Information hierarchy (separate from window size). */
+export type UiMode = 'cinematic' | 'standard' | 'developer'
 
 export interface RequestCard {
   requestId: string
@@ -50,6 +53,12 @@ export interface UiState {
   settingsOpen: boolean
   devOpen: boolean
   selectedRequest: string | null
+  uiMode: UiMode
+  /** Last measured latency per voice pipeline stage (ms). */
+  voiceLatency: Partial<Record<LatencyStage, number>>
+  latencyLog: { ts: number; stage: LatencyStage; ms: number }[]
+  orbDebug: DebugFlags
+  orbStats: OrbStats | null
 }
 
 const RING = 300
@@ -83,6 +92,11 @@ export const initialState: UiState = {
   settingsOpen: false,
   devOpen: false,
   selectedRequest: null,
+  uiMode: 'cinematic',
+  voiceLatency: {},
+  latencyLog: [],
+  orbDebug: { ...DEFAULT_DEBUG },
+  orbStats: null,
 }
 
 type Listener = () => void

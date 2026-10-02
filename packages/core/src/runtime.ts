@@ -25,7 +25,9 @@ import { registerFileTools } from './tools/files'
 import { ToolRegistry } from './tools/registry'
 import { registerSystemTools } from './tools/system'
 import type { AgentId, Subsystem } from './types'
+import { FallbackTTS } from './voice/fallback'
 import { MacSpeechTTS, WhisperCppSTT } from './voice/local'
+import { QwenSidecarTTS } from './voice/sidecar'
 
 const CONFIG_KEY = 'config'
 
@@ -49,7 +51,12 @@ export function binResolver(native: NativePort): (name: string) => Promise<strin
 
 export type Runtime = Awaited<ReturnType<typeof createRuntime>>
 
-export async function createRuntime(native: NativePort, db: SqlDriver) {
+export interface RuntimeOptions {
+  /** fetch able to stream response bodies to the TTS sidecar (defaults to native.fetch). */
+  ttsFetch?: typeof fetch
+}
+
+export async function createRuntime(native: NativePort, db: SqlDriver, opts: RuntimeOptions = {}) {
   const bus = new EventBus()
   const log = new Logger(bus, {})
   await migrate(db)
@@ -117,7 +124,20 @@ export async function createRuntime(native: NativePort, db: SqlDriver) {
 
   let whisperBinCache: string | null = null
   const stt = new WhisperCppSTT(native, () => ({ bin: whisperBinCache, modelPath: config.voice.sttModelPath, language: config.voice.sttLanguage }))
-  const tts = new MacSpeechTTS(native, () => ({ voiceKo: config.voice.ttsVoiceKo, voiceEn: config.voice.ttsVoiceEn, rate: config.voice.ttsRate }))
+  const macTts = new MacSpeechTTS(native, () => ({ voiceKo: config.voice.ttsVoiceKo, voiceEn: config.voice.ttsVoiceEn, rate: config.voice.ttsRate }))
+  const qwen = new QwenSidecarTTS(native, () => ({
+    python: config.voice.ttsPython,
+    script: config.voice.ttsServerScript,
+    port: config.voice.ttsPort,
+    profile: config.voice.voiceProfile,
+    quality: config.voice.voiceQuality,
+    chunkSeconds: config.voice.ttsChunkSeconds,
+    idleUnloadMin: config.voice.ttsIdleUnloadMin,
+  }), opts.ttsFetch ?? native.fetch)
+  const tts = new FallbackTTS(qwen, macTts, () => config.voice.ttsEngine === 'qwen3-mlx', (reason) => {
+    log.warn('tts fallback to macOS speech', { reason })
+    bus.emit('error', { code: 'VOICE_ENGINE_ERROR', message: `Qwen3-TTS unavailable, using macOS speech: ${reason}` })
+  })
 
   /** Real readiness checks — a subsystem reports READY only when it actually is. */
   async function checkReadiness(): Promise<Record<Subsystem, { ok: boolean; detail: string }>> {
@@ -130,8 +150,10 @@ export async function createRuntime(native: NativePort, db: SqlDriver) {
       native.systemMetrics().then(() => true, () => false),
     ])
     const liveModels = providerStatus.filter((p) => p.available)
+    const qwenOk = config.voice.ttsEngine === 'qwen3-mlx' && (await qwen.available())
+    const ttsName = qwenOk ? `Qwen3-TTS ${config.voice.voiceQuality.toLowerCase()} · ${config.voice.voiceProfile}` : 'macOS speech (fallback)'
     const result: Record<Subsystem, { ok: boolean; detail: string }> = {
-      voice: { ok: sttOk && ttsOk, detail: `STT ${sttOk ? 'whisper.cpp' : 'missing'} · TTS ${ttsOk ? 'macOS speech' : 'missing'}` },
+      voice: { ok: sttOk && ttsOk, detail: `STT ${sttOk ? 'whisper.cpp' : 'missing'} · TTS ${ttsOk ? ttsName : 'missing'}` },
       memory: { ok: memCount >= 0, detail: memCount >= 0 ? `${memCount} memories` : 'database unavailable' },
       router: { ok: true, detail: liveModels.length ? `L0 + ${liveModels.map((p) => p.label).join(', ')}` : 'L0 only (no model provider live)' },
       agents: { ok: agents.size === 6, detail: `${agents.size} agents · ${tools.list().length} tools` },
@@ -163,12 +185,14 @@ export async function createRuntime(native: NativePort, db: SqlDriver) {
     agents,
     stt,
     tts,
+    qwen,
     bin,
     checkReadiness,
     shutdown: async () => {
       executive.cancel()
       for (const timer of timers.values()) clearTimeout(timer)
       await aopNoteClient.close()
+      await qwen.shutdown()
     },
   }
 }

@@ -1,18 +1,18 @@
-import type { AgentId, RuntimeState } from '@aop/core'
+import type { RuntimeState } from '@aop/core'
 import * as THREE from 'three'
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 import type { AudioLevels } from '../audio/levels'
-import { markPolylines, O_INNER_RATIO } from './mark'
-import { BOOT_DONE, bootFrame, lerpVisual, QUALITY, targetFps, VISUALS, type Quality, type Visual } from './params'
+import { createEnvironment } from './materials'
+import { BOOT_DONE, bootFrame, DEFAULT_TAU, EASE_TAU, lerpVisual, QUALITY, targetFps, VISUALS, type Quality, type Visual } from './params'
+import { AOPOrbScene, DEFAULT_DEBUG, type AgentVisual, type DebugFlags, type Telemetry } from './scene'
 import * as S from './shaders'
 
-export type AgentVisualStatus = 'queued' | 'running' | 'waiting' | 'failed' | 'completed'
-export interface AgentVisual {
-  id: AgentId
-  status: AgentVisualStatus
-}
+export { AGENT_SLOTS, ORBIT_RADIUS, type AgentVisual, type AgentVisualStatus, type DebugFlags, DEFAULT_DEBUG } from './scene'
+
+export type OrbMode = 'cinematic' | 'standard' | 'developer' | 'ambient'
 
 export interface OrbInputs {
   state: RuntimeState
@@ -22,201 +22,115 @@ export interface OrbInputs {
   out: AudioLevels
   agents: AgentVisual[]
   quality: Quality
+  telemetry?: Telemetry | null
+  mode?: OrbMode
+  debug?: DebugFlags
 }
 
-// Orb-unit radii (1 = the O's outer radius).
-const R = { inner: O_INNER_RATIO, mid: 1.32, outer: 1.62, tick0: 1.76, tick1: 1.83, glyph: 1.98, orbit: 2.25 }
+export interface OrbStats {
+  fps: number
+  frameMs: number
+  cpuMs: number
+  drawCalls: number
+  triangles: number
+  programs: number
+  geometries: number
+  textures: number
+  particles: number
+  pixelRatio: number
+  quality: Quality
+  transmission: boolean
+  bloom: boolean
+  degraded: number
+}
+
+/** The z = 0 plane is fitted to this extent (orb units) — DOM overlays use the same fit. */
 export const EXTENT = { x: 2.9, y: 2.55 }
-const TICKS = 144
-
-/** Fixed slots so an agent always appears in the same place. Radians, y up. */
-export const AGENT_SLOTS: Record<AgentId, number> = {
-  research: (150 * Math.PI) / 180,
-  code: (30 * Math.PI) / 180,
-  communicator: (90 * Math.PI) / 180,
-  operator: (210 * Math.PI) / 180,
-  analyst: (330 * Math.PI) / 180,
-  reviewer: (270 * Math.PI) / 180,
-}
-export const ORBIT_RADIUS = R.orbit
-
-function lineMaterial(color = new THREE.Color(0.75, 0.88, 1)): THREE.ShaderMaterial {
-  return new THREE.ShaderMaterial({
-    vertexShader: S.lineVert,
-    fragmentShader: S.lineFrag,
-    uniforms: { uColor: { value: color }, uAlpha: { value: 1 }, uProgress: { value: 1 } },
-    transparent: true,
-    depthTest: false,
-    blending: THREE.AdditiveBlending,
-  })
-}
-
-/** Segments from polylines, with aDist = normalized arc length (for draw-on) and per-vertex alpha. */
-function segments(paths: [number, number][][], alpha: (pathIndex: number, t: number) => number = () => 1): THREE.BufferGeometry {
-  const pos: number[] = []
-  const dist: number[] = []
-  const alp: number[] = []
-  paths.forEach((path, pi) => {
-    let total = 0
-    for (let i = 1; i < path.length; i++) total += Math.hypot(path[i]![0] - path[i - 1]![0], path[i]![1] - path[i - 1]![1])
-    let acc = 0
-    for (let i = 1; i < path.length; i++) {
-      const [x0, y0] = path[i - 1]!
-      const [x1, y1] = path[i]!
-      const seg = Math.hypot(x1 - x0, y1 - y0)
-      pos.push(x0, y0, 0, x1, y1, 0)
-      dist.push(acc / total, (acc + seg) / total)
-      alp.push(alpha(pi, acc / total), alpha(pi, (acc + seg) / total))
-      acc += seg
-    }
-  })
-  const g = new THREE.BufferGeometry()
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
-  g.setAttribute('aDist', new THREE.Float32BufferAttribute(dist, 1))
-  g.setAttribute('aAlpha', new THREE.Float32BufferAttribute(alp, 1))
-  return g
-}
-
-const arcPath = (r: number, a0: number, a1: number, steps = 64): [number, number][] =>
-  Array.from({ length: steps + 1 }, (_, i) => {
-    const a = a0 + ((a1 - a0) * i) / steps
-    return [Math.cos(a) * r, Math.sin(a) * r]
-  })
-
-/** A ring made of arcs: `gaps` evenly spaced breaks of `gapFrac` of the circle each. */
-function brokenRing(r: number, gaps: number, gapFrac: number, offset = 0): [number, number][][] {
-  const seg = (Math.PI * 2) / gaps
-  return Array.from({ length: gaps }, (_, i) => arcPath(r, offset + i * seg + seg * gapFrac * 0.5, offset + (i + 1) * seg - seg * gapFrac * 0.5, 48))
-}
+const BASE_FOV = 30
+const TARGET = new THREE.Vector3(0, 0, -0.15)
 
 export class OrbRenderer {
   private renderer: THREE.WebGLRenderer
   private scene = new THREE.Scene()
-  private camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -10, 10)
-  private composer: EffectComposer | null = null
-  private bloom: UnrealBloomPass | null = null
-  private orb = new THREE.Group()
-  private inner = new THREE.Group()
-  private mid = new THREE.Group()
-  private outer = new THREE.Group()
-  private glyphs = new THREE.Group()
-  private bgMat: THREE.ShaderMaterial
-  private coreMat: THREE.ShaderMaterial
-  private mats: Record<'mark' | 'inner' | 'mid' | 'outer' | 'ticks' | 'glyph' | 'links', THREE.ShaderMaterial>
-  private tickGeo: THREE.BufferGeometry
-  private particles: THREE.Points | null = null
-  private particleMat: THREE.ShaderMaterial
-  private nodes: THREE.Points
-  private links: THREE.LineSegments
+  private camera = new THREE.PerspectiveCamera(BASE_FOV, 1, 0.1, 60)
+  private orb: AOPOrbScene
+  private bg: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>
+  private composer!: EffectComposer
+  private bloomComposer: EffectComposer | null = null
+  private bloomPass: UnrealBloomPass | null = null
+  private compositePass!: ShaderPass
   private visual: Visual = { ...VISUALS.DORMANT }
-  private scanAngle = 0
+  private prevState: RuntimeState | null = null
   private time = 0
+  private scanAngle = 0
+  private ignite = 0
+  private outEnv = { level: 0, low: 0, mid: 0, high: 0 }
+  private outQuietMs = 1000
   private last = 0
   private lastRender = 0
   private raf = 0
   private width = 1
   private height = 1
-  private scale = 1
+  private baseDist = 10
   private quality: Quality | null = null
-  private agentIntensity = new Map<AgentId, number>()
+  private debug: DebugFlags = { ...DEFAULT_DEBUG }
+  private explode = 0
   private resizeObserver: ResizeObserver
+  private occluded = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>()
+  private hidden: THREE.Object3D[] = []
+  // Adaptive quality + stats.
+  private dynamicRatio = 1
+  private degraded = 0
+  private frameEma = 16
+  private cpuEma = 4
+  private slowFor = 0
+  private fastFor = 0
+  private fpsCount = 0
+  private fpsAt = 0
+  private fps = 0
+  private lastStats: OrbStats | null = null
+  private snapNext = false
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly getInputs: () => OrbInputs,
-    private readonly onFrame?: (scale: number) => void,
+    private readonly onFrame?: (stats: OrbStats) => void,
   ) {
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' })
-    this.renderer.setClearColor(0x020305, 1)
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance', stencil: false })
+    this.renderer.setClearColor(0x010203, 1)
+    this.renderer.toneMapping = THREE.NoToneMapping // tone mapping happens once, in the composite pass
+    this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace
+    this.renderer.info.autoReset = false
+    this.scene.environment = createEnvironment(this.renderer)
+    this.scene.environmentIntensity = 1
 
-    const fsGeo = new THREE.PlaneGeometry(2, 2)
-    const fsUniforms = () => ({ uRes: { value: new THREE.Vector2() }, uScale: { value: 1 }, uTime: { value: 0 }, uTint: { value: new THREE.Color() }, uIntensity: { value: 1 } })
-    this.bgMat = new THREE.ShaderMaterial({ vertexShader: S.fullscreenVert, fragmentShader: S.backgroundFrag, uniforms: fsUniforms(), depthTest: false, depthWrite: false })
-    this.coreMat = new THREE.ShaderMaterial({
-      vertexShader: S.fullscreenVert,
-      fragmentShader: S.coreFrag,
-      uniforms: {
-        ...fsUniforms(),
-        uCore: { value: 0 },
-        uPulse: { value: 0 },
-        uPoint: { value: 0 },
-        uRing: { value: 0 },
-        uScan: { value: 0 },
-        uScanAngle: { value: 0 },
-        uFlare: { value: 0 },
-        uDistort: { value: 0 },
-        uInner: { value: R.inner },
-      },
-      transparent: true,
-      depthTest: false,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    })
-    const bg = new THREE.Mesh(fsGeo, this.bgMat)
-    bg.frustumCulled = false
-    bg.renderOrder = -2
-    const core = new THREE.Mesh(fsGeo, this.coreMat)
-    core.frustumCulled = false
-    core.renderOrder = -1
-    this.scene.add(bg, core, this.orb)
-
-    this.mats = { mark: lineMaterial(), inner: lineMaterial(), mid: lineMaterial(), outer: lineMaterial(), ticks: lineMaterial(), glyph: lineMaterial(), links: lineMaterial() }
-
-    // A and P structural frames, faded toward their outer ends so they read as optics, not lettering.
-    const { a, p } = markPolylines()
-    this.orb.add(new THREE.LineSegments(segments([a, p], (_pi, t) => 0.35 + 0.65 * Math.sin(Math.PI * Math.min(1, t * 1.1))), this.mats.mark))
-
-    this.inner.add(new THREE.LineSegments(segments([...brokenRing(R.inner * 0.86, 3, 0.18), ...brokenRing(R.inner * 0.74, 12, 0.55, 0.2)]), this.mats.inner))
-    this.mid.add(new THREE.LineSegments(segments([arcPath(R.mid, 0, Math.PI * 2, 256), ...brokenRing(R.mid + 0.05, 4, 0.62, Math.PI / 4)], (pi) => (pi === 0 ? 0.55 : 1)), this.mats.mid))
-    // The outer ring breaks where the A and P frames pass through it.
-    this.outer.add(new THREE.LineSegments(segments([arcPath(R.outer, 0.32, Math.PI - 0.32, 128), arcPath(R.outer, Math.PI + 0.32, Math.PI * 2 - 0.32, 128)]), this.mats.outer))
-    this.tickGeo = segments(Array.from({ length: TICKS }, () => [[0, 0], [0, 0]] as [number, number][]), (pi) => (pi % 12 === 0 ? 1 : 0.45))
-    this.outer.add(new THREE.LineSegments(this.tickGeo, this.mats.ticks))
-    const glyphPaths: [number, number][][] = []
-    for (let i = 0; i < 18; i++) {
-      const a0 = (i / 18) * Math.PI * 2
-      glyphPaths.push(arcPath(R.glyph, a0, a0 + 0.06 + (i % 3) * 0.04, 6))
-      if (i % 4 === 0) glyphPaths.push([[Math.cos(a0) * (R.glyph - 0.03), Math.sin(a0) * (R.glyph - 0.03)], [Math.cos(a0) * (R.glyph + 0.05), Math.sin(a0) * (R.glyph + 0.05)]])
-    }
-    this.glyphs.add(new THREE.LineSegments(segments(glyphPaths, () => 0.6), this.mats.glyph))
-    this.orb.add(this.inner, this.mid, this.outer, this.glyphs)
-
-    this.particleMat = new THREE.ShaderMaterial({
-      vertexShader: S.particleVert,
-      fragmentShader: S.particleFrag,
-      uniforms: { uTime: { value: 0 }, uSpeed: { value: 0.4 }, uPull: { value: 0 }, uSize: { value: 2.2 }, uPixelRatio: { value: 1 }, uScale: { value: 1 }, uColor: { value: new THREE.Color(0.8, 0.9, 1) }, uAlpha: { value: 0.4 } },
-      transparent: true,
-      depthTest: false,
-      blending: THREE.AdditiveBlending,
-    })
-
-    const slots = Object.keys(AGENT_SLOTS) as AgentId[]
-    const nodeGeo = new THREE.BufferGeometry()
-    nodeGeo.setAttribute('position', new THREE.Float32BufferAttribute(slots.flatMap((id) => [Math.cos(AGENT_SLOTS[id]) * R.orbit, Math.sin(AGENT_SLOTS[id]) * R.orbit, 0]), 3))
-    nodeGeo.setAttribute('aIntensity', new THREE.Float32BufferAttribute(new Float32Array(slots.length), 1))
-    nodeGeo.setAttribute('aPulse', new THREE.Float32BufferAttribute(new Float32Array(slots.length), 1))
-    this.nodes = new THREE.Points(
-      nodeGeo,
-      new THREE.ShaderMaterial({
-        vertexShader: S.nodeVert,
-        fragmentShader: S.nodeFrag,
-        uniforms: { uTime: { value: 0 }, uPixelRatio: { value: 1 }, uSize: { value: 26 }, uColor: { value: new THREE.Color(0.8, 0.92, 1) } },
-        transparent: true,
-        depthTest: false,
-        blending: THREE.AdditiveBlending,
-      }),
+    this.bg = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.ShaderMaterial({ vertexShader: S.background.vertex, fragmentShader: S.background.fragment, uniforms: { uTint: { value: new THREE.Color(0.7, 0.86, 1) }, uLift: { value: 1 }, uAspect: { value: 1 } }, depthWrite: false, depthTest: false }),
     )
-    this.links = new THREE.LineSegments(
-      segments(slots.map((id) => [[Math.cos(AGENT_SLOTS[id]) * 1.04, Math.sin(AGENT_SLOTS[id]) * 1.04], [Math.cos(AGENT_SLOTS[id]) * (R.orbit - 0.09), Math.sin(AGENT_SLOTS[id]) * (R.orbit - 0.09)]])),
-      this.mats.links,
-    )
-    this.orb.add(this.links, this.nodes)
+    this.bg.frustumCulled = false
+    this.bg.renderOrder = -100
+    this.scene.add(this.bg)
+
+    const initial = this.getInputs()
+    this.orb = new AOPOrbScene(QUALITY[initial.quality])
+    this.scene.add(this.orb.root)
+    this.scene.add(this.camera)
 
     this.resizeObserver = new ResizeObserver(() => this.resize())
     this.resizeObserver.observe(canvas)
-    this.resize()
+    this.applyQuality(initial.quality)
     this.raf = requestAnimationFrame(this.loop)
     document.addEventListener('visibilitychange', this.onVisibility)
+  }
+
+  /** Jump straight to the current state's visuals (capture harness / tests — the product always eases). */
+  snap(): void {
+    this.snapNext = true
+  }
+
+  stats(): OrbStats | null {
+    return this.lastStats
   }
 
   private onVisibility = (): void => {
@@ -227,48 +141,65 @@ export class OrbRenderer {
     }
   }
 
+  private preset() {
+    return QUALITY[this.quality ?? 'HIGH']
+  }
+
   private applyQuality(q: Quality): void {
     if (this.quality === q) return
     this.quality = q
     const preset = QUALITY[q]
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, preset.pixelRatio))
-    if (this.particles) {
-      this.orb.remove(this.particles)
-      this.particles.geometry.dispose()
-    }
-    const n = preset.particles
-    const g = new THREE.BufferGeometry()
-    g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n * 3), 3))
-    const seed = new Float32Array(n)
-    const radius = new Float32Array(n)
-    const angle = new Float32Array(n)
-    const speed = new Float32Array(n)
-    for (let i = 0; i < n; i++) {
-      seed[i] = Math.random()
-      // Mostly in the optical band between the rings, a few drifting outside.
-      radius[i] = Math.random() < 0.8 ? 1.05 + Math.pow(Math.random(), 1.6) * 0.95 : 2.0 + Math.random() * 0.8
-      angle[i] = Math.random() * Math.PI * 2
-      speed[i] = (0.02 + Math.random() * 0.08) * (Math.random() < 0.5 ? -1 : 1)
-    }
-    g.setAttribute('aSeed', new THREE.Float32BufferAttribute(seed, 1))
-    g.setAttribute('aRadius', new THREE.Float32BufferAttribute(radius, 1))
-    g.setAttribute('aAngle', new THREE.Float32BufferAttribute(angle, 1))
-    g.setAttribute('aSpeed', new THREE.Float32BufferAttribute(speed, 1))
-    this.particles = new THREE.Points(g, this.particleMat)
-    this.particles.frustumCulled = false
-    this.scene.add(this.particles)
+    this.dynamicRatio = Math.min(window.devicePixelRatio || 1, preset.pixelRatio)
+    this.degraded = 0
+    this.orb.setQuality(preset, this.debug.glass)
+    this.renderer.transmissionResolutionScale = preset.transmissionScale
+    this.buildPost()
+  }
 
+  private buildPost(): void {
+    const preset = this.preset()
     this.composer?.dispose()
-    this.composer = null
-    this.bloom = null
+    this.bloomComposer?.dispose()
+    this.renderer.setPixelRatio(this.dynamicRatio)
+    const w = this.width
+    const h = this.height
+    const rt = new THREE.WebGLRenderTarget(w * this.dynamicRatio, h * this.dynamicRatio, { type: THREE.HalfFloatType, samples: preset.msaa })
+    this.composer = new EffectComposer(this.renderer, rt)
+    this.composer.addPass(new RenderPass(this.scene, this.camera))
+    this.compositePass = new ShaderPass(
+      new THREE.ShaderMaterial({
+        vertexShader: S.composite.vertex,
+        fragmentShader: S.composite.fragment,
+        uniforms: {
+          tDiffuse: { value: null },
+          tBloom: { value: null },
+          uBloom: { value: 1 },
+          uStreak: { value: 0.05 },
+          uExposure: { value: 0.92 },
+          uVignette: { value: 0.55 },
+          uGrain: { value: 0.012 },
+          uCA: { value: 0.008 },
+          uTime: { value: 0 },
+          uTexel: { value: new THREE.Vector2(1 / w, 1 / h) },
+          uAspect: { value: w / h },
+          uHasBloom: { value: 0 },
+        },
+      }),
+    )
+    this.composer.addPass(this.compositePass)
+    this.bloomComposer = null
+    this.bloomPass = null
     if (preset.bloom) {
-      this.composer = new EffectComposer(this.renderer)
-      this.composer.addPass(new RenderPass(this.scene, this.camera))
-      this.bloom = new UnrealBloomPass(new THREE.Vector2(this.width, this.height), preset.bloomStrength, 0.32, 0.42)
-      // No OutputPass: shader colors are authored for display; sRGB re-encoding would lift the near-black.
-      this.composer.addPass(this.bloom)
+      const brt = new THREE.WebGLRenderTarget(w * this.dynamicRatio * preset.bloomScale, h * this.dynamicRatio * preset.bloomScale, { type: THREE.HalfFloatType })
+      this.bloomComposer = new EffectComposer(this.renderer, brt)
+      this.bloomComposer.renderToScreen = false
+      this.bloomComposer.setPixelRatio(this.dynamicRatio * preset.bloomScale)
+      this.bloomComposer.addPass(new RenderPass(this.scene, this.camera))
+      this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w * preset.bloomScale, h * preset.bloomScale), preset.bloomStrength, 0.38, 0.0)
+      this.bloomComposer.addPass(this.bloomPass)
+      this.bloomComposer.setSize(w, h)
     }
-    this.resize()
+    this.composer.setSize(w, h)
   }
 
   private resize(): void {
@@ -278,134 +209,218 @@ export class OrbRenderer {
     this.height = h
     this.renderer.setSize(w, h, false)
     this.composer?.setSize(w, h)
-    this.camera.left = -w / 2
-    this.camera.right = w / 2
-    this.camera.top = h / 2
-    this.camera.bottom = -h / 2
+    this.bloomComposer?.setSize(w, h)
+    this.bloomPass?.setSize(w * this.preset().bloomScale, h * this.preset().bloomScale)
+    // Fit the z = 0 plane to EXTENT exactly, so DOM overlays (agent labels) can use the same math.
+    const halfH = w / h > EXTENT.x / EXTENT.y ? EXTENT.y : (EXTENT.x * h) / w
+    this.baseDist = halfH / Math.tan(THREE.MathUtils.degToRad(BASE_FOV / 2))
+    this.camera.aspect = w / h
     this.camera.updateProjectionMatrix()
-    this.scale = Math.min(w / (2 * EXTENT.x), h / (2 * EXTENT.y))
-    this.orb.scale.setScalar(this.scale)
+    if (this.compositePass) {
+      this.compositePass.uniforms.uTexel!.value.set(1 / w, 1 / h)
+      this.compositePass.uniforms.uAspect!.value = w / h
+    }
+    this.bg.material.uniforms.uAspect!.value = w / h
   }
 
   private loop = (now: number): void => {
     this.raf = requestAnimationFrame(this.loop)
     const inputs = this.getInputs()
     this.applyQuality(inputs.quality)
-    const preset = QUALITY[inputs.quality]
-    const audioActive = inputs.mic.rms > 0.01 || inputs.out.rms > 0.005
-    const fps = targetFps(inputs.state, audioActive || inputs.bootT !== null || inputs.agents.length > 0, preset)
+    if (inputs.debug) this.setDebug(inputs.debug)
+    const preset = this.preset()
+    const ambient = inputs.mode === 'ambient'
+    const audioActive = inputs.mic.rms > 0.01 || inputs.out.rms > 0.005 || this.ignite > 0.02
+    let fps = targetFps(inputs.state, audioActive || inputs.bootT !== null || inputs.agents.length > 0, preset)
+    if (ambient) fps = Math.min(fps, 24)
     if (now - this.lastRender < 1000 / fps - 1) return
+    const interval = now - (this.lastRender || now)
     const dt = Math.min(0.1, (now - (this.last || now)) / 1000)
     this.last = now
     this.lastRender = now
-    this.update(inputs, dt)
-    if (this.composer) this.composer.render()
-    else this.renderer.render(this.scene, this.camera)
-    this.onFrame?.(this.scale)
+
+    const t0 = performance.now()
+    this.renderer.info.reset()
+    this.update(inputs, this.debug.freeze ? 0 : dt, dt)
+    this.render()
+    const cpuMs = performance.now() - t0
+    this.measure(now, interval, cpuMs, fps)
   }
 
-  private update(inputs: OrbInputs, dt: number): void {
+  private update(inputs: OrbInputs, dt: number, realDt: number): void {
     this.time += dt
-    // Inertia: ease toward the state's targets (~250ms time constant).
-    this.visual = lerpVisual(this.visual, VISUALS[inputs.state], 1 - Math.exp(-dt / 0.25))
+    const state = inputs.state
+    // Daily wake: a short ignition impulse, not the boot sequence.
+    if (this.prevState !== null && state !== this.prevState) {
+      if (state === 'LISTENING' && (this.prevState === 'DORMANT' || this.prevState === 'ONLINE' || this.prevState === 'SLEEP')) this.ignite = Math.max(this.ignite, 1)
+    }
+    this.prevState = state
+    const tau = EASE_TAU[state] ?? DEFAULT_TAU
+    this.visual = this.snapNext ? { ...VISUALS[state] } : lerpVisual(this.visual, VISUALS[state], 1 - Math.exp(-realDt / tau))
+    this.snapNext = false
     const v = this.visual
-    const boot = inputs.bootT !== null ? bootFrame(inputs.bootT) : inputs.state === 'DORMANT' ? { ...BOOT_DONE, mark: 0.35, point: 0.6 } : BOOT_DONE
-    const dpr = this.renderer.getPixelRatio()
-    const tint = new THREE.Color(v.tint[0], v.tint[1], v.tint[2])
+    const boot = inputs.bootT !== null ? bootFrame(inputs.bootT) : BOOT_DONE
 
-    // Voice → visuals. User speech drives the outer ticks; JARVIS speech drives the core.
+    // Output audio → features with speech-like attack/release (fast up, smooth decay). Speech onset ignites.
+    const b = inputs.out.bands
+    const avg = (i0: number, i1: number) => {
+      let s = 0
+      for (let i = i0; i <= i1; i++) s += b[i] ?? 0
+      return s / (i1 - i0 + 1)
+    }
+    const outLevel = Math.min(1, inputs.out.rms * 5)
+    const env = this.outEnv
+    const follow = (cur: number, target: number) => cur + (target - cur) * (target > cur ? 1 - Math.exp(-realDt / 0.03) : 1 - Math.exp(-realDt / 0.18))
+    env.level = follow(env.level, outLevel)
+    env.low = follow(env.low, Math.min(1, avg(0, 2) * outLevel * 3))
+    env.mid = follow(env.mid, Math.min(1, avg(3, 5) * outLevel * 3.5))
+    env.high = follow(env.high, Math.min(1, avg(6, 7) * outLevel * 5))
+    if (outLevel < 0.03) this.outQuietMs += realDt * 1000
+    else {
+      if (this.outQuietMs > 220) this.ignite = Math.max(this.ignite, 0.55)
+      this.outQuietMs = 0
+    }
+    this.ignite *= Math.exp(-realDt / 0.22)
+
     const micLevel = Math.min(1, inputs.mic.rms * 9) * v.micGain
-    const outLevel = Math.min(1, inputs.out.rms * 4.5)
+    this.scanAngle -= dt * (0.4 + v.scan * 1.6)
 
-    for (const m of [this.bgMat, this.coreMat]) {
-      m.uniforms.uRes!.value.set(this.width * dpr, this.height * dpr)
-      m.uniforms.uScale!.value = this.scale * dpr
-      m.uniforms.uTime!.value = this.time
-      ;(m.uniforms.uTint!.value as THREE.Color).copy(tint)
-      m.uniforms.uIntensity!.value = v.intensity
+    // Camera rig: sub-degree orbital drift + breathing; wake push, thinking focus, execution depth.
+    const yaw = THREE.MathUtils.degToRad(0.7) * Math.sin((this.time * Math.PI * 2) / 23) + THREE.MathUtils.degToRad(32) * this.explode
+    const pitch = THREE.MathUtils.degToRad(0.45) * Math.sin((this.time * Math.PI * 2) / 31 + 1) + THREE.MathUtils.degToRad(8) * this.explode
+    const dist = this.baseDist * v.camDist * (1 - this.ignite * 0.012) * (1 + 0.0025 * Math.sin((this.time * Math.PI * 2) / 9)) * (1 + this.explode * 0.15)
+    this.camera.position.set(TARGET.x + Math.sin(yaw) * Math.cos(pitch) * dist, TARGET.y + Math.sin(pitch) * dist, TARGET.z + Math.cos(yaw) * Math.cos(pitch) * dist)
+    this.camera.lookAt(TARGET)
+    const fov = BASE_FOV * v.camFov
+    if (Math.abs(this.camera.fov - fov) > 1e-4) {
+      this.camera.fov = fov
+      this.camera.updateProjectionMatrix()
     }
-    this.scanAngle -= dt * (0.8 + v.scan * 2.2)
-    const cu = this.coreMat.uniforms
-    cu.uCore!.value = v.core * boot.core + micLevel * 0.15
-    cu.uPulse!.value = outLevel
-    cu.uPoint!.value = boot.point
-    cu.uRing!.value = v.ring * boot.inner
-    cu.uScan!.value = v.scan
-    cu.uScanAngle!.value = this.scanAngle
-    cu.uFlare!.value = boot.flare
-    cu.uDistort!.value = v.distort + outLevel * 0.35
+    this.explode += ((this.debug.layers ? 1 : 0) - this.explode) * (1 - Math.exp(-realDt / 0.4))
+    this.orb.explode(this.explode, v.depth)
 
-    this.inner.rotation.z += dt * v.innerSpeed
-    this.mid.rotation.z += dt * v.midSpeed
-    this.outer.rotation.z += dt * v.outerSpeed
-    this.glyphs.rotation.z -= dt * v.outerSpeed * 0.6
+    ;(this.bg.material.uniforms.uTint!.value as THREE.Color).setRGB(v.tint[0], v.tint[1], v.tint[2])
+    this.bg.material.uniforms.uLift!.value = v.nucleus * boot.core
 
-    const lineColor = tint.clone().lerp(new THREE.Color(1, 1, 1), 0.25)
-    const setLine = (m: THREE.ShaderMaterial, alpha: number, progress = 1) => {
-      ;(m.uniforms.uColor!.value as THREE.Color).copy(lineColor)
-      m.uniforms.uAlpha!.value = alpha * v.intensity
-      m.uniforms.uProgress!.value = progress
-    }
-    setLine(this.mats.mark, 0.16 + v.ring * 0.14, boot.mark)
-    setLine(this.mats.inner, 0.5 * v.ring, boot.inner)
-    setLine(this.mats.mid, 0.38 * v.ring, boot.outer)
-    setLine(this.mats.outer, 0.3 * v.ring, boot.outer)
-    setLine(this.mats.ticks, (0.32 + micLevel * 0.5) * v.ring, boot.outer)
-    setLine(this.mats.glyph, 0.22 * v.ring, boot.outer)
-    this.updateTicks(inputs.mic.bands, micLevel)
-
-    const pu = this.particleMat.uniforms
-    pu.uTime!.value = this.time
-    pu.uSpeed!.value = v.particleSpeed
-    pu.uPull!.value = v.pull * (0.3 + micLevel)
-    pu.uAlpha!.value = v.particleAlpha * boot.particles * v.intensity
-    pu.uPixelRatio!.value = dpr
-    pu.uScale!.value = this.scale
-    ;(pu.uColor!.value as THREE.Color).copy(lineColor)
-
-    this.updateAgents(inputs.agents, dt, dpr, lineColor)
-  }
-
-  private updateTicks(bands: Float32Array, level: number): void {
-    const pos = this.tickGeo.getAttribute('position') as THREE.BufferAttribute
-    for (let i = 0; i < TICKS; i++) {
-      const a = (i / TICKS) * Math.PI * 2
-      // Map ticks symmetrically onto the 8 voice bands so speech blooms evenly around the ring.
-      const band = bands[Math.floor((Math.abs(Math.sin(a * 0.5)) * 7.99)) % bands.length] ?? 0
-      const len = (i % 12 === 0 ? 0.09 : 0.04) + band * level * 0.22
-      const r0 = R.tick0
-      pos.setXYZ(i * 2, Math.cos(a) * r0, Math.sin(a) * r0, 0)
-      pos.setXYZ(i * 2 + 1, Math.cos(a) * (r0 + len), Math.sin(a) * (r0 + len), 0)
-    }
-    pos.needsUpdate = true
-  }
-
-  private updateAgents(agents: AgentVisual[], dt: number, dpr: number, color: THREE.Color): void {
-    const slots = Object.keys(AGENT_SLOTS) as AgentId[]
-    const intensity = this.nodes.geometry.getAttribute('aIntensity') as THREE.BufferAttribute
-    const pulse = this.nodes.geometry.getAttribute('aPulse') as THREE.BufferAttribute
-    const linkAlpha = this.links.geometry.getAttribute('aAlpha') as THREE.BufferAttribute
-    const k = 1 - Math.exp(-dt / 0.2)
-    slots.forEach((id, i) => {
-      const a = agents.find((x) => x.id === id)
-      const target = !a ? 0 : a.status === 'queued' ? 0.3 : a.status === 'completed' ? 0.45 : a.status === 'failed' ? 0.5 : 1
-      const current = (this.agentIntensity.get(id) ?? 0) + (target - (this.agentIntensity.get(id) ?? 0)) * k
-      this.agentIntensity.set(id, current)
-      intensity.setX(i, current)
-      pulse.setX(i, a?.status === 'running' ? 1 : a?.status === 'waiting' ? 0.4 : 0)
-      const link = a?.status === 'running' || a?.status === 'waiting' ? current : current * 0.25
-      linkAlpha.setX(i * 2, link * 0.8)
-      linkAlpha.setX(i * 2 + 1, link * 0.15)
+    this.orb.update({
+      time: this.time,
+      dt,
+      v,
+      boot,
+      out: env,
+      mic: { level: micLevel, bands: inputs.mic.bands },
+      ignite: this.ignite,
+      scanAngle: this.scanAngle,
+      agents: inputs.agents,
+      telemetry: inputs.telemetry ?? null,
+      stateLabel: state.replace('_', ' '),
+      pixelRatio: this.dynamicRatio,
+      viewHeight: this.height,
     })
-    intensity.needsUpdate = true
-    pulse.needsUpdate = true
-    linkAlpha.needsUpdate = true
-    const nu = (this.nodes.material as THREE.ShaderMaterial).uniforms
-    nu.uTime!.value = this.time
-    nu.uPixelRatio!.value = dpr
-    ;(nu.uColor!.value as THREE.Color).copy(color)
-    this.mats.links.uniforms.uAlpha!.value = 0.6
-    ;(this.mats.links.uniforms.uColor!.value as THREE.Color).copy(color)
+
+    const cu = this.compositePass.uniforms
+    cu.uTime!.value = this.time
+    cu.uStreak!.value = this.preset().streak ? 0.045 + boot.flare * 0.2 : 0
+  }
+
+  /** Selective bloom: only objects tagged 'bloom' emit; opaque structure occludes as black; the rest is hidden. */
+  private render(): void {
+    const useBloom = !!this.bloomComposer && this.debug.bloom
+    if (useBloom) {
+      this.bg.visible = false
+      this.orb.root.traverseVisible((o) => {
+        const t = o.userData.orb as string | undefined
+        if (t === 'bloom') return
+        if (t === 'hide' || o instanceof THREE.Points || o instanceof THREE.Light || o instanceof THREE.Box3Helper) {
+          if (o.visible && !(o instanceof THREE.Light)) this.hidden.push(o)
+          return
+        }
+        if (o instanceof THREE.Mesh) {
+          this.occluded.set(o, o.material)
+          o.material = this.orb.mats.occluder
+        }
+      })
+      for (const o of this.hidden) o.visible = false
+      this.renderer.setClearColor(0x000000, 1)
+      this.bloomComposer!.render()
+      for (const o of this.hidden) o.visible = true
+      this.hidden.length = 0
+      for (const [m, mat] of this.occluded) m.material = mat
+      this.occluded.clear()
+      this.bg.visible = true
+      this.renderer.setClearColor(0x010203, 1)
+      this.compositePass.uniforms.tBloom!.value = this.bloomComposer!.readBuffer.texture
+    }
+    this.compositePass.uniforms.uHasBloom!.value = useBloom ? 1 : 0
+    this.composer.render()
+  }
+
+  /** Frame stats + adaptive degradation: lower the internal pixel ratio first, then drop transmission. */
+  private measure(now: number, interval: number, cpuMs: number, targetFps: number): void {
+    this.frameEma += (interval - this.frameEma) * 0.08
+    this.cpuEma += (cpuMs - this.cpuEma) * 0.08
+    this.fpsCount++
+    if (now - this.fpsAt >= 1000) {
+      this.fps = (this.fpsCount * 1000) / (now - this.fpsAt || 1000)
+      this.fpsCount = 0
+      this.fpsAt = now
+    }
+    const budget = 1000 / targetFps
+    const preset = this.preset()
+    if (interval > 0 && interval < 500) {
+      if (this.frameEma > budget * 1.35) {
+        this.slowFor += interval
+        this.fastFor = 0
+      } else if (this.frameEma < budget * 1.08) {
+        this.fastFor += interval
+        this.slowFor = 0
+      }
+    }
+    if (this.slowFor > 2500) {
+      this.slowFor = 0
+      if (this.dynamicRatio > preset.minPixelRatio + 0.01) {
+        this.dynamicRatio = Math.max(preset.minPixelRatio, this.dynamicRatio - 0.25)
+        this.degraded++
+        this.buildPost()
+      } else if (this.degraded < 99 && preset.transmission) {
+        this.orb.setGlass(false)
+        this.degraded = 99
+      }
+    } else if (this.fastFor > 8000 && this.degraded > 0 && this.degraded < 99) {
+      this.fastFor = 0
+      const cap = Math.min(window.devicePixelRatio || 1, preset.pixelRatio)
+      if (this.dynamicRatio < cap) {
+        this.dynamicRatio = Math.min(cap, this.dynamicRatio + 0.25)
+        this.degraded--
+        this.buildPost()
+      }
+    }
+    const info = this.renderer.info
+    this.lastStats = {
+      fps: this.fps,
+      frameMs: this.frameEma,
+      cpuMs: this.cpuEma,
+      drawCalls: info.render.calls,
+      triangles: info.render.triangles,
+      programs: info.programs?.length ?? 0,
+      geometries: info.memory.geometries,
+      textures: info.memory.textures,
+      particles: this.orb.particleCount(),
+      pixelRatio: this.dynamicRatio,
+      quality: this.quality ?? 'HIGH',
+      transmission: preset.transmission && this.debug.glass && this.degraded < 99,
+      bloom: !!this.bloomComposer && this.debug.bloom,
+      degraded: this.degraded,
+    }
+    this.onFrame?.(this.lastStats)
+  }
+
+  private setDebug(d: DebugFlags): void {
+    const prev = this.debug
+    if (prev.layers === d.layers && prev.bounds === d.bounds && prev.ringIds === d.ringIds && prev.bloom === d.bloom && prev.particles === d.particles && prev.glass === d.glass && prev.freeze === d.freeze) return
+    this.debug = { ...d }
+    this.orb.setDebug(d)
+    if (prev.glass !== d.glass) this.orb.setGlass(this.preset().transmission && d.glass && this.degraded < 99)
   }
 
   dispose(): void {
@@ -413,12 +428,11 @@ export class OrbRenderer {
     document.removeEventListener('visibilitychange', this.onVisibility)
     this.resizeObserver.disconnect()
     this.composer?.dispose()
-    this.scene.traverse((o) => {
-      if (o instanceof THREE.Mesh || o instanceof THREE.LineSegments || o instanceof THREE.Points) {
-        o.geometry.dispose()
-        ;(o.material as THREE.Material).dispose()
-      }
-    })
+    this.bloomComposer?.dispose()
+    this.orb.dispose()
+    this.bg.geometry.dispose()
+    this.bg.material.dispose()
+    this.scene.environment?.dispose()
     this.renderer.dispose()
   }
 }

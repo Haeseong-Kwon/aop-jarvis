@@ -4,7 +4,7 @@ import { currentMonitor, getCurrentWindow, LogicalPosition, LogicalSize } from '
 import { register, unregisterAll } from '@tauri-apps/plugin-global-shortcut'
 import { Microphone } from '../audio/mic'
 import { BootAudio, SpeechOutput } from '../audio/output'
-import { store, type WindowMode } from '../store'
+import { store, type UiMode, type WindowMode } from '../store'
 import { createNativePort } from './native'
 import { openDatabase } from './sql'
 
@@ -15,19 +15,23 @@ const BOOT_AUDIO_TAIL_MS = 8000
 /** Owns the runtime and every host resource (mic, speakers, hotkey, window). The UI only calls its actions. */
 export class Controller {
   readonly mic: Microphone
-  readonly speech = new SpeechOutput()
+  readonly speech: SpeechOutput
   readonly bootAudio = new BootAudio()
   readonly voice: VoiceSession
   private metricsTimer: ReturnType<typeof setInterval> | null = null
   private disposers: (() => void)[] = []
+  private warmed: Promise<void> | null = null
 
   private constructor(readonly rt: Runtime) {
     const cfg = rt.getConfig()
+    this.speech = new SpeechOutput(cfg.voice.mastering)
     this.mic = new Microphone(
       {
         onSpeechStart: () => this.voice.speechStart(),
         onSpeechEnd: (samples) => void this.voice.speechEnd(samples),
         isOutputActive: () => this.speech.active,
+        outputLevel: () => this.speech.refLevel(),
+        onActivity: (phase) => rt.bus.emit('voice:activity', { source: 'user', phase }),
       },
       cfg.voice.vadSensitivity,
       cfg.voice.silenceMs,
@@ -44,8 +48,13 @@ export class Controller {
       },
       wakeWordEnabled: () => rt.getConfig().voice.wakeWordEnabled,
       bargeIn: () => rt.getConfig().voice.bargeIn,
+      planner: () => ({ koNumbers: rt.getConfig().voice.koNumbers }),
     })
-    this.speech.onActiveChange = (active) => this.bootAudio.duck(active, rt.getConfig().boot)
+    // One central audio timeline: the Orb and the UI react to these, not to private timers.
+    this.speech.onActiveChange = (active) => {
+      this.bootAudio.duck(active, rt.getConfig().boot)
+      rt.bus.emit('voice:activity', { source: 'assistant', phase: active ? 'start' : 'end' })
+    }
   }
 
   static async start(): Promise<Controller> {
@@ -54,7 +63,7 @@ export class Controller {
     const rt = await createRuntime(native, db)
     const c = new Controller(rt)
     c.wire()
-    store.set({ config: rt.getConfig(), devOpen: rt.getConfig().developer.panel })
+    store.set({ config: rt.getConfig(), uiMode: rt.getConfig().orb.uiMode, devOpen: rt.getConfig().developer.panel || rt.getConfig().orb.uiMode === 'developer' })
     return c
   }
 
@@ -65,6 +74,12 @@ export class Controller {
     const on = <T>(off: () => T) => this.disposers.push(off as () => void)
     on(bus.on('voice:state', ({ state }) => this.update({ voice: state })))
     on(bus.on('voice:transcript', ({ text }) => store.set({ transcript: text })))
+    on(
+      bus.on('voice:latency', ({ stage, ms }) => {
+        store.set((s) => ({ voiceLatency: { ...s.voiceLatency, [stage]: ms }, latencyLog: [...s.latencyLog.slice(-199), { ts: Date.now(), stage, ms }] }))
+        store.pushStream('voice', `${stage} ${ms}ms`)
+      }),
+    )
     on(
       bus.on('request:started', ({ requestId, text }) => {
         store.set((s) => ({
@@ -161,7 +176,45 @@ export class Controller {
     this.update({ booting: false, booted: true })
     const cfg = this.rt.getConfig()
     setTimeout(() => this.bootAudio.fadeOut(cfg.boot.fadeOutMs), BOOT_AUDIO_TAIL_MS)
-    if (cfg.voice.enabled) await this.startMic(cfg.voice.inputDeviceId)
+    if (cfg.voice.enabled) {
+      await this.startMic(cfg.voice.inputDeviceId)
+      void this.greet()
+    }
+  }
+
+  /**
+   * Cold-boot greeting only (never on ordinary wake). It waits briefly for the primary voice; if the premium
+   * engine isn't ready, JARVIS stays silent rather than greeting in the fallback voice.
+   */
+  private async greet(): Promise<void> {
+    const cfg = this.rt.getConfig()
+    if (!cfg.voice.bootGreeting) return
+    const ready = await Promise.race([this.warmVoice().then(() => this.rt.tts.active === 'primary'), new Promise<boolean>((r) => setTimeout(() => r(false), 6000))])
+    if (!ready || store.get().voice !== 'IDLE') return
+    const text = cfg.voice.bootGreetingText.trim() || (cfg.voice.sttLanguage === 'ko' ? '시스템 준비가 완료되었습니다.' : 'AOP online.')
+    await this.voice.speak(text, /[가-힣]/.test(text) ? 'ko' : 'en')
+  }
+
+  /** Lazy model residency: the TTS model loads on first voice use and then stays resident in the sidecar. */
+  warmVoice(): Promise<void> {
+    this.warmed ??= this.rt.tts.warmup().catch(() => undefined)
+    return this.warmed
+  }
+
+  /** Explicit cinematic command: replay the full assembly sequence (never used for ordinary wake). */
+  replayBoot(): void {
+    if (store.get().booting) return
+    store.set({ bootStartedAt: performance.now() })
+    this.update({ booting: true })
+    setTimeout(() => this.update({ booting: false, booted: true }), 3400)
+  }
+
+  setUiMode(mode: UiMode | 'ambient'): void {
+    if (mode === 'ambient') return void this.setMode('ambient')
+    if (store.get().mode === 'ambient') void this.setMode('expanded')
+    store.set({ uiMode: mode, devOpen: mode === 'developer' })
+    const cfg = this.rt.getConfig()
+    void this.rt.saveConfig({ ...cfg, orb: { ...cfg.orb, uiMode: mode } }).then((saved) => store.set({ config: saved }))
   }
 
   private async playBootAudio(cfg: JarvisConfig): Promise<void> {
@@ -228,6 +281,7 @@ export class Controller {
   wake(): void {
     if (!store.get().booted) return
     if (!this.mic.active && this.rt.getConfig().voice.enabled) void this.startMic(this.rt.getConfig().voice.inputDeviceId)
+    void this.warmVoice()
     this.voice.wake()
   }
 
@@ -246,6 +300,11 @@ export class Controller {
     const saved = await this.rt.saveConfig(next)
     store.set({ config: saved })
     this.mic.setSensitivity(saved.voice.vadSensitivity)
+    if (saved.voice.mastering !== prev.voice.mastering) this.speech.setMastering(saved.voice.mastering)
+    if (saved.voice.voiceQuality !== prev.voice.voiceQuality || saved.voice.ttsEngine !== prev.voice.ttsEngine) {
+      this.warmed = null
+      void this.warmVoice()
+    }
     if (saved.hotkey !== prev.hotkey) await this.registerHotkey(saved.hotkey)
     if (saved.voice.inputDeviceId !== prev.voice.inputDeviceId && this.mic.active) await this.startMic(saved.voice.inputDeviceId)
     if (!saved.voice.enabled && this.mic.active) await this.mic.stop()

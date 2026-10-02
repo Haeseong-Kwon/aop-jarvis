@@ -105,4 +105,130 @@ export class EnergyVad {
     this.aboveMs = 0
     this.belowMs = 0
   }
+
+  /** Enter the speaking state directly (barge-in confirmed by the EchoGate); end detection proceeds normally. */
+  forceStart(): void {
+    this.speaking = true
+    this.aboveMs = 0
+    this.belowMs = 0
+  }
+}
+
+/** Decode a PCM WAV (8/16/24/32-bit int or 32-bit float, any channel count) to mono float32. */
+export function decodeWav(bytes: Uint8Array): { samples: Float32Array; sampleRate: number } {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const tag = (o: number) => String.fromCharCode(bytes[o]!, bytes[o + 1]!, bytes[o + 2]!, bytes[o + 3]!)
+  if (bytes.length < 12 || tag(0) !== 'RIFF' || tag(8) !== 'WAVE') throw new Error('not a WAV file')
+  let off = 12
+  let format = 1
+  let channels = 1
+  let sampleRate = 16000
+  let bits = 16
+  while (off + 8 <= bytes.length) {
+    const id = tag(off)
+    const size = view.getUint32(off + 4, true)
+    const body = off + 8
+    if (id === 'fmt ') {
+      format = view.getUint16(body, true)
+      channels = view.getUint16(body + 2, true)
+      sampleRate = view.getUint32(body + 4, true)
+      bits = view.getUint16(body + 14, true)
+    } else if (id === 'data') {
+      const len = Math.min(size, bytes.length - body)
+      const bps = bits / 8
+      const frames = Math.floor(len / (bps * channels))
+      const out = new Float32Array(frames)
+      for (let i = 0; i < frames; i++) {
+        let acc = 0
+        for (let c = 0; c < channels; c++) {
+          const p = body + (i * channels + c) * bps
+          acc +=
+            format === 3 && bits === 32
+              ? view.getFloat32(p, true)
+              : bits === 16
+                ? view.getInt16(p, true) / 32768
+                : bits === 8
+                  ? (bytes[p]! - 128) / 128
+                  : bits === 24
+                    ? (((bytes[p + 2]! << 24) | (bytes[p + 1]! << 16) | (bytes[p]! << 8)) >> 8) / 8388608
+                    : view.getInt32(p, true) / 2147483648
+        }
+        out[i] = acc / channels
+      }
+      return { samples: out, sampleRate }
+    }
+    off = body + size + (size % 2)
+  }
+  throw new Error('WAV has no data chunk')
+}
+
+export interface EchoGateOptions {
+  /** How far above the estimated echo the mic must be to count as the user (dB). */
+  marginDb: number
+  /** Sustained speech required before a barge-in fires (ms). */
+  minSpeechMs: number
+  /** After JARVIS starts a sound, the gate only learns for this long (speaker ring-up, AEC convergence). */
+  onsetHoldMs: number
+  /** Acoustic path delay window searched for the matching reference level (ms). */
+  historyMs: number
+  /** Absolute floor below which nothing is speech. */
+  floor: number
+}
+
+/**
+ * Barge-in validation without muting the microphone. While JARVIS speaks, the (echo-cancelled) mic still
+ * carries residual echo. The gate tracks the playback reference level, learns the speaker→mic coupling from
+ * frames where only JARVIS is audible, and confirms user speech only when the mic stays clearly above the
+ * echo predicted from the reference for `minSpeechMs`.
+ */
+export class EchoGate {
+  private readonly o: EchoGateOptions
+  private history: number[] = []
+  private coupling = 0.3
+  private aboveMs = 0
+  private activeMs = 0
+  private fired = false
+
+  constructor(options: Partial<EchoGateOptions> = {}) {
+    this.o = { marginDb: 7, minSpeechMs: 160, onsetHoldMs: 150, historyMs: 300, floor: 0.012, ...options }
+  }
+
+  get couplingEstimate(): number {
+    return this.coupling
+  }
+
+  process(micRms: number, refRms: number, frameMs: number, outputActive: boolean): { bargeIn: boolean; echo: number; speech: boolean } {
+    if (!outputActive) {
+      this.reset()
+      return { bargeIn: false, echo: 0, speech: false }
+    }
+    this.history.push(refRms)
+    const keep = Math.max(1, Math.ceil(this.o.historyMs / frameMs))
+    while (this.history.length > keep) this.history.shift()
+    this.activeMs += frameMs
+    const ref = Math.max(...this.history)
+    const echo = ref * this.coupling
+    const threshold = Math.max(this.o.floor, echo * Math.pow(10, this.o.marginDb / 20))
+    const speech = micRms > threshold
+    if (this.activeMs <= this.o.onsetHoldMs || (!speech && ref > 0.01)) {
+      // Echo-only frame: adapt coupling (fast up, slow down) so loud playback doesn't look like the user.
+      if (ref > 0.01) {
+        const ratio = Math.min(2, micRms / ref)
+        this.coupling += (ratio - this.coupling) * (ratio > this.coupling ? 0.25 : 0.03)
+      }
+      this.aboveMs = 0
+      return { bargeIn: false, echo, speech: false }
+    }
+    this.aboveMs = speech ? this.aboveMs + frameMs : Math.max(0, this.aboveMs - frameMs * 2)
+    const bargeIn = !this.fired && this.aboveMs >= this.o.minSpeechMs
+    if (bargeIn) this.fired = true
+    return { bargeIn, echo, speech }
+  }
+
+  reset(): void {
+    this.history = []
+    this.aboveMs = 0
+    this.activeMs = 0
+    this.fired = false
+  }
 }

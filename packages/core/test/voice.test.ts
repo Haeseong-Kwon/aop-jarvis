@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { EventBus } from '../src/events'
 import type { VoiceState } from '../src/types'
 import { EnergyVad, encodeWav } from '../src/voice/audio'
-import { TranscriptWakeWord, VoiceSession, type AudioOutput } from '../src/voice/session'
+import { TranscriptWakeWord, VoiceSession, type AudioOutput, type PcmChunk, type TTSProvider } from '../src/voice/session'
+import { decodeWav } from '../src/voice/audio'
 
 describe('TranscriptWakeWord', () => {
   const wake = new TranscriptWakeWord()
@@ -45,14 +46,27 @@ describe('encodeWav', () => {
   })
 })
 
-function harness(transcripts: string[]) {
+function harness(transcripts: string[], tts?: TTSProvider) {
   const bus = new EventBus()
   const states: VoiceState[] = []
   bus.on('voice:state', (s) => states.push(s.state))
   let resolvePlay: (() => void) | null = null
-  const output: AudioOutput & { stopped: number } = {
+  const output: AudioOutput & { stopped: number; pushed: PcmChunk[]; gaps: number[] } = {
     stopped: 0,
-    play: () => new Promise<void>((r) => (resolvePlay = r)),
+    pushed: [],
+    gaps: [],
+    begin(onFirst) {
+      this.pushed = []
+      this.gaps = []
+      queueMicrotask(() => onFirst?.())
+    },
+    push(c) {
+      this.pushed.push(c)
+    },
+    gap(ms) {
+      this.gaps.push(ms)
+    },
+    drain: () => new Promise<void>((r) => (resolvePlay = r)),
     stop() {
       this.stopped++
       resolvePlay?.()
@@ -61,7 +75,7 @@ function harness(transcripts: string[]) {
   const handled: string[] = []
   const session = new VoiceSession({
     stt: { id: 'fake', available: async () => true, transcribe: async () => transcripts.shift() ?? '' },
-    tts: { id: 'fake', available: async () => true, synthesize: async () => new Uint8Array(44) },
+    tts: tts ?? { id: 'fake', available: async () => true, synthesize: async () => encodeWav(new Float32Array(160), 16000) },
     wake: new TranscriptWakeWord(),
     output,
     bus,
@@ -75,7 +89,7 @@ function harness(transcripts: string[]) {
     clearTimer: () => undefined,
   })
   const utterance = new Float32Array(16000)
-  return { session, states, handled, output, utterance, finishPlayback: () => resolvePlay?.() }
+  return { session, states, handled, output, bus, utterance, finishPlayback: () => resolvePlay?.() }
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0))
@@ -151,5 +165,98 @@ describe('voice safety', () => {
     h.finishPlayback()
     await done
     expect(h.session.state).toBe('IDLE')
+  })
+})
+
+/** A streaming fake engine: yields `n` chunks per segment, records abort. */
+function streamingTts(n = 3) {
+  const calls: string[] = []
+  let aborted = 0
+  const tts: TTSProvider = {
+    id: 'stream-fake',
+    available: async () => true,
+    synthesize: async () => encodeWav(new Float32Array(160), 24000),
+    voiceKey: () => 'stream-fake/v1',
+    async *stream(text, _lang, signal) {
+      calls.push(text)
+      for (let i = 0; i < n; i++) {
+        await tick()
+        if (signal?.aborted) {
+          aborted++
+          return
+        }
+        yield { samples: new Float32Array(240), sampleRate: 24000 }
+      }
+    },
+  }
+  return { tts, calls, aborted: () => aborted }
+}
+
+describe('streaming speech pipeline', () => {
+  it('speaks planned segments as they stream, with semantic gaps', async () => {
+    const f = streamingTts()
+    const h = harness([], f.tts)
+    const done = h.session.speak('좋은 오후입니다. 현재 시스템은 정상적으로 작동하고 있습니다. 진행 중인 작업은 2건입니다.', 'ko')
+    for (let i = 0; i < 20; i++) await tick()
+    expect(h.session.state).toBe('SPEAKING')
+    expect(f.calls[0]).toBe('좋은 오후입니다.')
+    expect(f.calls[1]).toContain('두 건')
+    expect(h.output.pushed.length).toBe(6)
+    expect(h.output.gaps.length).toBe(1)
+    h.finishPlayback()
+    await done
+    expect(h.session.state).toBe('IDLE')
+  })
+
+  it('barge-in cancels pending synthesis, not just playback', async () => {
+    const f = streamingTts(50)
+    const h = harness([], f.tts)
+    h.session.wake()
+    const done = h.session.speak('첫 문장입니다. 두 번째 문장은 꽤 길어서 생성에 시간이 걸립니다.', 'ko', true)
+    for (let i = 0; i < 4; i++) await tick()
+    expect(h.session.state).toBe('SPEAKING')
+    h.session.speechStart()
+    expect(h.output.stopped).toBe(1)
+    expect(h.session.state).toBe('LISTENING')
+    await done
+    expect(f.aborted()).toBe(1)
+    expect(f.calls.length).toBe(1) // the second segment was never requested
+  })
+
+  it('caches stable system phrases per voice and replays them without synthesis', async () => {
+    const f = streamingTts(2)
+    const h = harness([], f.tts)
+    for (let k = 0; k < 2; k++) {
+      const done = h.session.speak('확인했습니다.', 'ko')
+      for (let i = 0; i < 10; i++) await tick()
+      h.finishPlayback()
+      await done
+    }
+    expect(f.calls).toEqual(['확인했습니다.'])
+    expect(h.output.pushed.length).toBe(1) // second time: one cached buffer
+  })
+
+  it('emits latency metrics for the turn', async () => {
+    const f = streamingTts(1)
+    const h = harness(['open chrome'], f.tts)
+    const stages: string[] = []
+    h.bus.on('voice:latency', (m) => stages.push(m.stage))
+    h.session.wake()
+    h.session.speechStart()
+    const pending = h.session.speechEnd(h.utterance)
+    for (let i = 0; i < 10; i++) await tick()
+    h.finishPlayback()
+    await pending
+    expect(stages).toEqual(expect.arrayContaining(['stt', 'handler', 'tts_first_chunk', 'first_audio', 'turn_total']))
+  })
+})
+
+describe('decodeWav', () => {
+  it('round-trips encodeWav', () => {
+    const src = Float32Array.from({ length: 100 }, (_, i) => Math.sin(i / 5) * 0.5)
+    const { samples, sampleRate } = decodeWav(encodeWav(src, 22050))
+    expect(sampleRate).toBe(22050)
+    expect(samples.length).toBe(100)
+    expect(Math.abs(samples[10]! - src[10]!)).toBeLessThan(1e-3)
   })
 })

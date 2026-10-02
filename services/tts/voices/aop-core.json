@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "note": "Original AOP voice identity. Candidates are described, never cloned from a real person. Each candidate's reference clip is generated once with Qwen3-TTS VoiceDesign (fixed seed) and then locked: runtime speech uses the Base model conditioned on that clip, so the identity is stable across responses. Re-running design with a different seed creates a different voice — bump the id when you do.",
+  "default": "aop-core-a",
+  "candidates": [
+    {
+      "id": "aop-core-a",
+      "name": "AOP CORE A — calm / low / formal",
+      "instruct": "A composed, sophisticated adult male AI assistant in his forties. Low-mid pitch, calm authority, precise articulation and a measured, slightly deliberate pace. Clean, dry studio recording with no room reverb. Subtle warmth, never theatrical, never exaggerated, minimal breathiness. Not an announcer and not a game character. Natural conversational prosody with clear sentence-final intonation in Korean and English.",
+      "ref_text": "좋은 오후입니다. 현재 시스템은 정상적으로 작동하고 있습니다. All systems are operational, and I'll keep you informed.",
+      "ref_lang": "ko",
+      "seed": 1103,
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "repetition_penalty": 1.05,
+      "notes": "Primary candidate: restrained, authoritative, lowest energy."
+    },
+    {
+      "id": "aop-core-b",
+      "name": "AOP CORE B — warmer / conversational",
+      "instruct": "A warm, intelligent adult male assistant with a low-mid voice. Relaxed and conversational, quietly confident, gently reassuring. Clear diction, natural pauses, close-mic studio sound without reverb. Polite and understated; never cheerful, never salesy, never dramatic. Fluent, natural Korean and English.",
+      "ref_text": "좋은 오후입니다. 현재 시스템은 정상적으로 작동하고 있습니다. All systems are operational, and I'll keep you informed.",
+      "ref_lang": "ko",
+      "seed": 2207,
+      "temperature": 0.75,
+      "top_p": 0.92,
+      "repetition_penalty": 1.05,
+      "notes": "More human warmth; may read less 'AI' but more natural in long answers."
+    },
+    {
+      "id": "aop-core-c",
+      "name": "AOP CORE C — synthetic precision",
+      "instruct": "A precise, cool-toned adult male artificial intelligence. Mid-low pitch, very even rhythm, crisp consonants, controlled and neutral emotion with a faint sense of warmth. Clean studio sound, no reverb, no robotic effects. Calm, efficient and exact, like a high-end onboard computer that speaks perfect Korean and English.",
+      "ref_text": "좋은 오후입니다. 현재 시스템은 정상적으로 작동하고 있습니다. All systems are operational, and I'll keep you informed.",
+      "ref_lang": "ko",
+      "seed": 3301,
+      "temperature": 0.65,
+      "top_p": 0.88,
+      "repetition_penalty": 1.05,
+      "notes": "Most 'machine' identity; check that it stays natural, not robotic."
+    }
+  ]
+}

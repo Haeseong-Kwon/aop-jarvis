@@ -190,3 +190,25 @@ button, input, select, textarea { font: inherit; color: inherit; }
   .panel.context, .results { display: none; }
   .caption { width: min(520px, calc(100vw - 420px)); }
 }
+
+/* ---- interface modes ---- */
+.sysbar .modes { display: inline-flex; gap: 2px; margin-right: 6px; padding-right: 8px; border-right: 1px solid var(--hair); }
+.sysbar .modes .iconbtn[aria-pressed='true'] { color: var(--ink); border-color: var(--hair); }
+body[data-mode='cinematic'] .sysbar { opacity: 0.55; transition: opacity .4s var(--ease); }
+body[data-mode='cinematic'] .sysbar:hover { opacity: 1; }
+.panel.subtle { background: none; border-color: transparent; backdrop-filter: none; opacity: 0.7; }
+.panel.subtle h3 { letter-spacing: 0.18em; font-size: 10px; text-transform: uppercase; }
+.panel.active-task { right: 24px; bottom: 24px; max-width: 280px; text-align: right; }
+.panel.active-task .what { font-size: 12.5px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel.active-task .who { font-size: 10.5px; letter-spacing: 0.18em; color: var(--ink-3); margin-top: 2px; }
+body[data-mode='cinematic'] .caption { width: min(560px, calc(100vw - 640px)); }
+
+/* ---- developer: voice lab + graphics ---- */
+.voicelab { display: flex; flex-direction: column; gap: 10px; }
+.voicelab label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--ink-3); }
+.voicelab .row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.voicelab textarea, .voicelab select, .voicelab input { background: rgba(255,255,255,0.03); border: 1px solid var(--hair); border-radius: 6px; padding: 6px 8px; color: var(--ink); font: 12px/1.45 var(--sans); }
+.voicelab input[type='number'] { width: 90px; }
+.voicelab .wave { width: 100%; height: 80px; border: 1px solid var(--hair); border-radius: 6px; }
+.voicelab .ab { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.dev .toggles { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 12px 0; font-size: 12px; color: var(--ink-2); }

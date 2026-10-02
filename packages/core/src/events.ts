@@ -22,6 +22,10 @@ export interface JarvisEvents {
   'system:ready': { subsystem: Subsystem; ok: boolean; detail: string }
   'voice:state': { state: VoiceState }
   'voice:transcript': { text: string; final: boolean }
+  /** Pipeline latency for one stage of a voice turn (ms). */
+  'voice:latency': { stage: import('./voice/session').LatencyStage; ms: number }
+  /** Central audio timeline: who is producing sound right now (drives the Orb deterministically). */
+  'voice:activity': { source: 'user' | 'assistant'; phase: 'start' | 'end' }
   'request:started': { requestId: string; text: string }
   'request:completed': { requestId: string; response: string; tier: Tier; ok: boolean }
   'intent:resolved': { requestId: string; intent: string; tier: Tier; confidence: number; entities: Record<string, unknown> }

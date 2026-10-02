@@ -1,6 +1,9 @@
 import { errorMessage } from '../errors'
 import type { EventBus } from '../events'
 import type { VoiceState } from '../types'
+import { decodeWav } from './audio'
+import { SpeechCache } from './cache'
+import { planSpeech, type PlannerOptions } from './planner'
 
 // Provider interfaces — local implementations are first-class (whisper.cpp, macOS speech).
 
@@ -10,11 +13,23 @@ export interface STTProvider {
   transcribe(samples16k: Float32Array, signal?: AbortSignal): Promise<string>
 }
 
+/** Mono PCM, float32 in [-1, 1]. */
+export interface PcmChunk {
+  samples: Float32Array
+  sampleRate: number
+}
+
 export interface TTSProvider {
   readonly id: string
   available(): Promise<boolean>
-  /** Returns encoded audio (WAV) for the host to play through its analyser. */
-  synthesize(text: string, lang: 'ko' | 'en'): Promise<Uint8Array>
+  /** Returns encoded audio (WAV). Used when the engine cannot stream. */
+  synthesize(text: string, lang: 'ko' | 'en', signal?: AbortSignal): Promise<Uint8Array>
+  /** Streams PCM as it is generated. Aborting the signal must stop generation, not just delivery. */
+  stream?(text: string, lang: 'ko' | 'en', signal?: AbortSignal): AsyncIterable<PcmChunk>
+  /** Identity of the current voice (engine + model + profile + parameters) — the phrase-cache key prefix. */
+  voiceKey?(): string
+  /** Load models ahead of the first utterance (lazy residency). */
+  warmup?(): Promise<void>
 }
 
 /** Decides whether an utterance addresses JARVIS; returns the command after the wake word ('' = wake only). */
@@ -23,11 +38,21 @@ export interface WakeWordProvider {
   match(transcript: string): { woke: boolean; command: string }
 }
 
+/**
+ * Gapless speech sink (the host's playback queue). Chunks pushed during one utterance play back-to-back;
+ * `gap` inserts semantic silence; `stop` cancels instantly (barge-in).
+ */
 export interface AudioOutput {
-  /** Resolves when playback ends or is stopped. */
-  play(audio: Uint8Array): Promise<void>
+  /** Start a new utterance (cancels anything still queued). `onFirstAudio` fires when sound actually starts. */
+  begin(onFirstAudio?: () => void): void
+  push(chunk: PcmChunk): void
+  gap(ms: number): void
+  /** Resolves when everything pushed has played, or as soon as `stop()` is called. */
+  drain(): Promise<void>
   stop(): void
 }
+
+export type LatencyStage = 'wake' | 'vad_end' | 'stt' | 'handler' | 'tts_first_chunk' | 'first_audio' | 'turn_total' | 'interrupt'
 
 // Transcript-based wake word: whisper writes "AOP" many ways. Matching happens on a normalized form.
 const WAKE_VARIANTS = ['aop', 'a.o.p', 'ao p', 'eiop', '에이오피', '에이오비', '에이오프', '에이 오 피', '에이오 피', '에이 오피', 'jarvis', '자비스', '쟈비스']
@@ -73,6 +98,11 @@ export interface VoiceSessionDeps {
   bargeIn: () => boolean
   /** How long to keep listening for a follow-up without the wake word. */
   followUpMs?: number
+  /** SpeechPlanner options (number style, lexicon, chunk sizes). */
+  planner?: () => PlannerOptions
+  /** Phrase cache for stable system phrases (same voice + text). */
+  cache?: SpeechCache
+  now?: () => number
   /** Clock injection for tests. */
   setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>
   clearTimer?: (t: ReturnType<typeof setTimeout>) => void
@@ -91,8 +121,21 @@ export class VoiceSession {
   private request: AbortController | null = null
   private followUpTimer: ReturnType<typeof setTimeout> | null = null
   private capturing = false
+  private speech: AbortController | null = null
+  private turnStart: number | null = null
+  private readonly cache: SpeechCache
 
-  constructor(private readonly d: VoiceSessionDeps) {}
+  constructor(private readonly d: VoiceSessionDeps) {
+    this.cache = d.cache ?? new SpeechCache()
+  }
+
+  private now(): number {
+    return this.d.now ? this.d.now() : typeof performance !== 'undefined' ? performance.now() : Date.now()
+  }
+
+  private metric(stage: LatencyStage, ms: number): void {
+    this.d.bus.emit('voice:latency', { stage, ms: Math.round(ms) })
+  }
 
   get state(): VoiceState {
     return this._state
@@ -113,6 +156,7 @@ export class VoiceSession {
   /** Stop everything and go idle. */
   sleep(): void {
     this.request?.abort()
+    this.speech?.abort()
     this.d.output.stop()
     this.clearFollowUp()
     this.set('IDLE')
@@ -137,6 +181,8 @@ export class VoiceSession {
   async speechEnd(samples16k: Float32Array): Promise<void> {
     if (!this.capturing) return
     this.capturing = false
+    const vadEndAt = this.now()
+    this.turnStart = vadEndAt
     if (samples16k.length < MIN_UTTERANCE_SAMPLES) return this.armFollowUpIfListening()
     const wasIdle = this._state === 'IDLE'
     if (wasIdle && !this.d.wakeWordEnabled()) return
@@ -149,12 +195,14 @@ export class VoiceSession {
       this.fail(`STT failed: ${errorMessage(error)}`)
       return
     }
+    this.metric('stt', this.now() - vadEndAt)
     if (wasIdle) {
       const m = isHallucination(text) ? { woke: false, command: '' } : this.d.wake.match(text)
       if (!m.woke) return
       this.d.bus.emit('voice:transcript', { text, final: true })
       if (!m.command) {
         this.set('LISTENING')
+        this.metric('wake', this.now() - vadEndAt)
         return this.armFollowUp()
       }
       return this.run(m.command)
@@ -169,6 +217,7 @@ export class VoiceSession {
     this.request = new AbortController()
     const signal = this.request.signal
     let reply: { speech: string; lang: 'ko' | 'en' }
+    const handlerAt = this.now()
     try {
       reply = await this.d.handler(text, signal)
     } catch (error) {
@@ -176,6 +225,7 @@ export class VoiceSession {
       this.fail(errorMessage(error))
       return
     }
+    this.metric('handler', this.now() - handlerAt)
     if (signal.aborted || this._state !== 'THINKING') return
     await this.speak(reply.speech, reply.lang, true)
   }
@@ -191,22 +241,79 @@ export class VoiceSession {
         this.armFollowUp()
       } else this.set('IDLE')
     }
-    if (!this.d.tts || !text.trim()) return after()
-    let audio: Uint8Array
+    const plan = planSpeech(text, { lang, ...this.d.planner?.() })
+    if (!this.d.tts || plan.skip) return after()
+    this.speech?.abort()
+    const ctl = new AbortController()
+    this.speech = ctl
+    const speakAt = this.now()
+    const turnStart = this.turnStart
+    this.turnStart = null
+    let started = false
+    this.d.output.begin(() => {
+      this.metric('first_audio', this.now() - speakAt)
+      if (turnStart !== null) this.metric('turn_total', this.now() - turnStart)
+    })
     try {
-      audio = await this.d.tts.synthesize(speakable(text), lang)
+      for (const seg of plan.segments) {
+        for await (const chunk of this.chunks(seg.text, seg.lang, plan.cacheable, ctl.signal)) {
+          if (ctl.signal.aborted) break
+          if (!started) {
+            // Only start talking if nothing else (barge-in, sleep, a newer turn) took over meanwhile.
+            if (this._state !== 'THINKING' && this._state !== 'LISTENING' && this._state !== 'IDLE') {
+              ctl.abort()
+              break
+            }
+            started = true
+            this.metric('tts_first_chunk', this.now() - speakAt)
+            this.set('SPEAKING')
+          }
+          this.d.output.push(chunk)
+        }
+        if (ctl.signal.aborted) break
+        if (seg.pauseAfterMs) this.d.output.gap(seg.pauseAfterMs)
+      }
     } catch (error) {
+      if (ctl.signal.aborted) return
+      this.d.output.stop()
       this.fail(`TTS failed: ${errorMessage(error)}`)
       return
     }
-    if (this._state !== 'THINKING' && this._state !== 'LISTENING' && this._state !== 'IDLE') return
-    this.set('SPEAKING')
-    await this.d.output.play(audio)
-    if ((this._state as VoiceState) === 'SPEAKING') after()
+    if (ctl.signal.aborted) return
+    if (!started) return after()
+    await this.d.output.drain()
+    if (this.speech === ctl) this.speech = null
+    if ((this._state as VoiceState) === 'SPEAKING' && !ctl.signal.aborted) after()
+  }
+
+  /** One segment's audio: phrase cache → streaming engine → whole-file fallback. */
+  private async *chunks(text: string, lang: 'ko' | 'en', cacheable: boolean, signal: AbortSignal): AsyncGenerator<PcmChunk> {
+    const tts = this.d.tts!
+    const key = cacheable ? `${tts.voiceKey?.() ?? tts.id}|${lang}|${text}` : null
+    const hit = key ? this.cache.get(key) : undefined
+    if (hit) {
+      yield hit
+      return
+    }
+    const collected: PcmChunk[] = []
+    if (tts.stream) {
+      for await (const c of tts.stream(text, lang, signal)) {
+        if (key) collected.push(c)
+        yield c
+      }
+    } else {
+      const c = decodeWav(await tts.synthesize(text, lang, signal))
+      if (key) collected.push(c)
+      yield c
+    }
+    if (key && !signal.aborted && collected.length) this.cache.set(key, SpeechCache.concat(collected))
   }
 
   private interrupt(): void {
+    const at = this.now()
+    this.speech?.abort()
     this.d.output.stop()
+    this.metric('interrupt', this.now() - at)
     this.request?.abort()
     this.set('INTERRUPTED')
   }

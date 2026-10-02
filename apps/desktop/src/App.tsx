@@ -3,7 +3,7 @@ import { Controller } from './host/controller'
 import { Orb } from './orb/Orb'
 import { store, useUi } from './store'
 import { DevPanel } from './ui/DevPanel'
-import { AgentLabels, Caption, ContextPanel, ExecutionStream, ResultCards, SystemBar } from './ui/Hud'
+import { ActiveTask, AgentLabels, Caption, ContextPanel, ExecutionStream, ResultCards, SystemBar } from './ui/Hud'
 import { Onboarding } from './ui/Onboarding'
 import { ApprovalPanel, BootOverlay, CommandPalette } from './ui/Overlays'
 import { Settings } from './ui/Settings'
@@ -43,7 +43,7 @@ function useShortcuts(c: Controller) {
         store.set({ settingsOpen: true })
       } else if (e.key.toLowerCase() === 'd' && e.shiftKey) {
         e.preventDefault()
-        store.set((s) => ({ devOpen: !s.devOpen }))
+        c.setUiMode(store.get().uiMode === 'developer' ? 'standard' : 'developer')
       } else if (e.key === 'Enter') {
         e.preventDefault()
         c.wake()
@@ -58,10 +58,12 @@ function Workspace({ c }: { c: Controller }) {
   const mode = useUi((s) => s.mode)
   const booted = useUi((s) => s.booted)
   const onboarded = useUi((s) => s.config?.onboarded ?? false)
+  const uiMode = useUi((s) => s.uiMode)
   useShortcuts(c)
   useEffect(() => {
     document.body.classList.toggle('ambient', mode === 'ambient')
-  }, [mode])
+    document.body.dataset.mode = uiMode
+  }, [mode, uiMode])
   useEffect(() => {
     if (onboarded && !booted && !store.get().booting) void c.boot()
   }, [onboarded, booted, c])
@@ -77,7 +79,22 @@ function Workspace({ c }: { c: Controller }) {
         <>
           <div className="drag" data-tauri-drag-region />
           <SystemBar />
-          {booted && (
+          {booted && uiMode === 'cinematic' && (
+            <>
+              <Caption />
+              <ContextPanel subtle />
+              <ActiveTask />
+            </>
+          )}
+          {booted && uiMode === 'standard' && (
+            <>
+              <AgentLabels />
+              <Caption />
+              <ContextPanel />
+              <ResultCards />
+            </>
+          )}
+          {booted && uiMode === 'developer' && (
             <>
               <AgentLabels />
               <Caption />

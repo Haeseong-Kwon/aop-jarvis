@@ -1,9 +1,11 @@
 import type { AuditRecord, CostSummary } from '@aop/core'
 import { useEffect, useState } from 'react'
 import { store, useUi } from '../store'
+import { GraphicsDebug } from './GraphicsDebug'
 import { clock, useController } from './shared'
+import { VoiceLab, VoiceLatency } from './VoiceLab'
 
-const TABS = ['Overview', 'Tasks', 'Tools', 'Memory', 'Cost', 'Events', 'Logs'] as const
+const TABS = ['Overview', 'Tasks', 'Tools', 'Memory', 'Cost', 'Voice', 'Voice Lab', 'Graphics', 'Events', 'Logs'] as const
 type Tab = (typeof TABS)[number]
 const usd = (n: number): string => `$${n.toFixed(n < 1 ? 4 : 2)}`
 const pct = (n: number): string => `${Math.round(n * 100)}%`
@@ -16,7 +18,7 @@ export function DevPanel() {
     <aside className="sheet dev" aria-label="Developer panel">
       <header>
         <h2>Developer</h2>
-        <button className="iconbtn" onClick={() => store.set({ devOpen: false })}>
+        <button className="iconbtn" onClick={() => store.set((s) => ({ devOpen: false, uiMode: s.uiMode === 'developer' ? 'standard' : s.uiMode }))}>
           Close
         </button>
       </header>
@@ -33,6 +35,9 @@ export function DevPanel() {
         {tab === 'Tools' && <Tools />}
         {tab === 'Memory' && <Memory />}
         {tab === 'Cost' && <Cost />}
+        {tab === 'Voice' && <VoiceLatency />}
+        {tab === 'Voice Lab' && <VoiceLab />}
+        {tab === 'Graphics' && <GraphicsDebug />}
         {tab === 'Events' && <Events />}
         {tab === 'Logs' && <Logs />}
       </div>

@@ -1,15 +1,20 @@
-import { EnergyVad, resample, STT_SAMPLE_RATE } from '@aop/core'
+import { EchoGate, EnergyVad, resample, rms, STT_SAMPLE_RATE } from '@aop/core'
 import { BAND_COUNT, readBands, readRms, type AudioLevels } from './levels'
 
-const FRAME_SIZE = 2048
+// ~21 ms frames at 48 kHz: barge-in decisions need fine time resolution.
+const FRAME_SIZE = 1024
 const PRE_ROLL_MS = 350
 const MAX_UTTERANCE_MS = 15_000
 
 export interface MicCallbacks {
   onSpeechStart: () => void
   onSpeechEnd: (samples16k: Float32Array) => void
-  /** True while JARVIS speaks: the VAD raises its bar so TTS echo is not taken as barge-in. */
+  /** True while JARVIS speaks: user-speech onset is then decided by the EchoGate against the playback reference. */
   isOutputActive: () => boolean
+  /** Playback reference level (RMS of what JARVIS is outputting right now). */
+  outputLevel: () => number
+  /** Speech activity transitions for the central audio timeline. */
+  onActivity?: (phase: 'start' | 'end') => void
 }
 
 /**
@@ -24,6 +29,9 @@ export class Microphone {
   private analyser: AnalyserNode | null = null
   private processor: ScriptProcessorNode | null = null
   private vad: EnergyVad
+  private gate = new EchoGate()
+  /** Last EchoGate decision, for the developer panel. */
+  readonly echo = { estimate: 0, coupling: 0, bargeIns: 0 }
   private preRoll: Float32Array[] = []
   private utterance: Float32Array[] = []
   private utteranceMs = 0
@@ -66,12 +74,29 @@ export class Microphone {
     const preRollFrames = Math.ceil(PRE_ROLL_MS / frameMs)
     this.processor.onaudioprocess = (e) => {
       const frame = new Float32Array(e.inputBuffer.getChannelData(0))
-      const d = this.vad.process(frame, frameMs, this.cb.isOutputActive())
+      const outputActive = this.cb.isOutputActive()
+      let d: { event: 'start' | 'end' | null }
+      if (outputActive && !this.speaking) {
+        // JARVIS is talking: never mute the mic (that would break barge-in) — validate against its echo instead.
+        // The VAD is not fed here so its noise floor doesn't adapt to JARVIS's own voice.
+        const g = this.gate.process(rms(frame), this.cb.outputLevel(), frameMs, true)
+        this.echo.estimate = g.echo
+        this.echo.coupling = this.gate.couplingEstimate
+        d = { event: g.bargeIn ? 'start' : null }
+        if (g.bargeIn) {
+          this.echo.bargeIns++
+          this.vad.forceStart()
+        }
+      } else {
+        if (!outputActive) this.gate.reset()
+        d = this.vad.process(frame, frameMs, false)
+      }
       if (d.event === 'start') {
         this.speaking = true
         this.utterance = [...this.preRoll]
         this.utteranceMs = this.utterance.length * frameMs
         this.cb.onSpeechStart()
+        this.cb.onActivity?.('start')
       }
       if (this.speaking) {
         this.utterance.push(frame)
@@ -93,6 +118,7 @@ export class Microphone {
 
   private finish(sampleRate: number): void {
     this.speaking = false
+    this.cb.onActivity?.('end')
     this.vad.reset()
     const total = this.utterance.reduce((n, f) => n + f.length, 0)
     const joined = new Float32Array(total)

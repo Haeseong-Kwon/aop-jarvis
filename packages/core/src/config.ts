@@ -42,6 +42,23 @@ const voiceSchema = z.object({
   silenceMs: z.number().default(700),
   inputDeviceId: z.string().default('default'),
   bargeIn: z.boolean().default(true),
+  /** Primary TTS engine. Falls back to macOS speech automatically when the sidecar is unavailable. */
+  ttsEngine: z.enum(['qwen3-mlx', 'macos-say']).default('qwen3-mlx'),
+  /** CINEMATIC: 1.7B + in-context identity lock. BALANCED: 1.7B + x-vector. FAST: 0.6B. */
+  voiceQuality: z.enum(['CINEMATIC', 'BALANCED', 'FAST']).default('CINEMATIC'),
+  voiceProfile: z.string().default('aop-core-a'),
+  ttsPython: z.string().default('~/Library/Application Support/aop-jarvis/tts-venv/bin/python'),
+  ttsServerScript: z.string().default('~/Library/Application Support/aop-jarvis/tts/aop_tts_server.py'),
+  ttsPort: z.number().int().default(47821),
+  ttsChunkSeconds: z.number().min(0.08).max(2).default(0.32),
+  ttsIdleUnloadMin: z.number().nonnegative().default(30),
+  /** Korean number reading: spell out (deterministic) or leave digits to the engine. */
+  koNumbers: z.enum(['hangul', 'digits']).default('hangul'),
+  /** Post-synthesis mastering (high-pass, gentle EQ, light compression, limiter). */
+  mastering: z.boolean().default(true),
+  /** Spoken greeting after a cold boot only (never on ordinary wake). Empty = default per language. */
+  bootGreeting: z.boolean().default(true),
+  bootGreetingText: z.string().default(''),
 })
 
 const bootSchema = z.object({
@@ -90,8 +107,10 @@ export const configSchema = z.object({
     .object({
       quality: z.enum(['LOW', 'BALANCED', 'HIGH', 'ULTRA']).default('HIGH'),
       telemetry: z.boolean().default(true),
+      /** Information hierarchy: CINEMATIC (Orb dominant), STANDARD (task cards), DEVELOPER (full diagnostics). */
+      uiMode: z.enum(['cinematic', 'standard', 'developer']).default('cinematic'),
     })
-    .default({ quality: 'HIGH', telemetry: true }),
+    .default({ quality: 'HIGH', telemetry: true, uiMode: 'cinematic' }),
   memory: memorySchema.default(() => memorySchema.parse({})),
   context: z
     .object({

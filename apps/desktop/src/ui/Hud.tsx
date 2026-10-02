@@ -27,6 +27,7 @@ export function SystemBar() {
   const metrics = useUi((s) => s.metrics)
   const telemetry = useUi((s) => s.config?.orb.telemetry ?? true)
   const micError = useUi((s) => s.micError)
+  const uiMode = useUi((s) => s.uiMode)
   const now = useNow(1000)
   const c = useController()
   const tone = state === 'ERROR' ? 'error' : state === 'WAITING_APPROVAL' ? 'warn' : 'ok'
@@ -39,7 +40,7 @@ export function SystemBar() {
       </span>
       {micError && <span style={{ color: 'var(--amber)' }}>Microphone unavailable — check System Settings › Privacy › Microphone</span>}
       <span className="spacer" />
-      {telemetry && metrics && (
+      {telemetry && metrics && uiMode !== 'cinematic' && (
         <>
           <span className="metric">
             CPU <b>{metrics.cpuPercent.toFixed(0)}%</b>
@@ -59,12 +60,16 @@ export function SystemBar() {
         <button className="iconbtn" onClick={() => store.set({ paletteOpen: true })} title="Command (⌘K)">
           Command
         </button>
-        <button className="iconbtn" onClick={() => void c.setMode('ambient')} title="Shrink to the ambient orb">
-          Ambient
-        </button>
-        <button className="iconbtn" onClick={() => store.set((s) => ({ devOpen: !s.devOpen }))} title="Developer panel (⌘⇧D)">
-          Developer
-        </button>
+        <span className="modes" role="group" aria-label="Interface mode">
+          {(['cinematic', 'standard', 'developer'] as const).map((m) => (
+            <button key={m} className="iconbtn" aria-pressed={uiMode === m} onClick={() => c.setUiMode(m)} title={m === 'developer' ? 'Developer (⌘⇧D)' : undefined}>
+              {m[0]!.toUpperCase() + m.slice(1)}
+            </button>
+          ))}
+          <button className="iconbtn" onClick={() => c.setUiMode('ambient')} title="Shrink to the ambient orb">
+            Ambient
+          </button>
+        </span>
         <button className="iconbtn" onClick={() => store.set({ settingsOpen: true })} title="Settings (⌘,)">
           Settings
         </button>
@@ -111,21 +116,26 @@ export function Caption() {
   )
 }
 
-export function ContextPanel() {
+export function ContextPanel({ subtle = false }: { subtle?: boolean }) {
   const ctx = useUi((s) => s.context)
   const routing = useUi((s) => s.routing)
-  const rows: [string, unknown][] = [
-    ['Project', ctx.activeProject],
-    ['Branch', ctx.activeBranch],
-    ['Active app', ctx.activeApp],
-    ['Current task', ctx.currentTask],
-    ['Last decision', ctx.lastDecision],
-    ['Last route', routing ? `${routing.tier} · ${routing.model}` : null],
-  ]
+  const rows: [string, unknown][] = subtle
+    ? [
+        ['Project', ctx.activeProject],
+        ['Active app', ctx.activeApp],
+      ]
+    : [
+        ['Project', ctx.activeProject],
+        ['Branch', ctx.activeBranch],
+        ['Active app', ctx.activeApp],
+        ['Current task', ctx.currentTask],
+        ['Last decision', ctx.lastDecision],
+        ['Last route', routing ? `${routing.tier} · ${routing.model}` : null],
+      ]
   const visible = rows.filter(([, v]) => v)
   if (!visible.length) return null
   return (
-    <section className="panel context" aria-label="Context">
+    <section className={`panel context${subtle ? ' subtle' : ''}`} aria-label="Context">
       <h3>Context</h3>
       <dl className="kv">
         {visible.map(([k, v]) => (
@@ -188,5 +198,20 @@ export function ResultCards() {
         )
       })}
     </div>
+  )
+}
+
+/** Cinematic mode: the one thing being worked on right now, quietly, opposite the context. */
+export function ActiveTask() {
+  const tasks = useUi((s) => s.tasks)
+  const running = Object.values(tasks).filter((t) => t.status === 'RUNNING' || t.status === 'WAITING_APPROVAL' || t.status === 'PLANNING')
+  if (!running.length) return null
+  const t = running.sort((a, b) => b.createdAt - a.createdAt)[0]!
+  return (
+    <section className="panel active-task subtle" aria-label="Active task">
+      <h3>{running.length > 1 ? `Active · ${running.length}` : 'Active'}</h3>
+      <div className="what">{t.title}</div>
+      <div className="who">{AGENT_LABEL[t.agent]}{t.status === 'WAITING_APPROVAL' ? ' · waiting for approval' : ''}</div>
+    </section>
   )
 }

@@ -172,9 +172,32 @@ function Voice({ d, set }: P) {
       <Field label="End of speech (ms)" hint="Silence before transcribing"><Num value={v.silenceMs} onChange={(x) => upd({ silenceMs: Math.max(200, x) })} /></Field>
       <Field label="Speech model" hint="whisper.cpp ggml file"><Text value={v.sttModelPath} onChange={(x) => upd({ sttModelPath: x })} /></Field>
       <Field label="Recognition language" hint="auto, ko, en"><Text value={v.sttLanguage} onChange={(x) => upd({ sttLanguage: x })} /></Field>
-      <Field label="Korean voice"><Text value={v.ttsVoiceKo} onChange={(x) => upd({ ttsVoiceKo: x })} /></Field>
-      <Field label="English voice"><Text value={v.ttsVoiceEn} onChange={(x) => upd({ ttsVoiceEn: x })} /></Field>
-      <Field label="Speaking rate" hint="Words per minute"><Num value={v.ttsRate} onChange={(x) => upd({ ttsRate: x })} /></Field>
+      <Field label="Voice engine" hint="Qwen3-TTS runs locally on MLX (scripts/setup-tts.sh); macOS speech is the automatic fallback">
+        <select value={v.ttsEngine} onChange={(e) => upd({ ttsEngine: e.target.value as typeof v.ttsEngine })}>
+          <option value="qwen3-mlx">AOP voice — Qwen3-TTS (local)</option>
+          <option value="macos-say">macOS speech</option>
+        </select>
+      </Field>
+      <Field label="Voice quality" hint="CINEMATIC: 1.7B with identity lock · BALANCED: 1.7B faster · FAST: 0.6B">
+        <select value={v.voiceQuality} onChange={(e) => upd({ voiceQuality: e.target.value as typeof v.voiceQuality })}>
+          <option value="CINEMATIC">Cinematic</option>
+          <option value="BALANCED">Balanced</option>
+          <option value="FAST">Fast</option>
+        </select>
+      </Field>
+      <Field label="AOP voice" hint="Candidate id from Voice Lab (Developer › Voice Lab)"><Text value={v.voiceProfile} onChange={(x) => upd({ voiceProfile: x })} /></Field>
+      <Field label="Korean numbers" hint="Spell out numbers for deterministic pronunciation">
+        <select value={v.koNumbers} onChange={(e) => upd({ koNumbers: e.target.value as typeof v.koNumbers })}>
+          <option value="hangul">Spell out (이십육 퍼센트)</option>
+          <option value="digits">Leave digits (26 퍼센트)</option>
+        </select>
+      </Field>
+      <Field label="Voice mastering" hint="High-pass, gentle EQ, light compression, limiter"><Toggle value={v.mastering} onChange={(x) => upd({ mastering: x })} /></Field>
+      <Field label="Greeting after startup" hint="Cold boot only — never on ordinary wake"><Toggle value={v.bootGreeting} onChange={(x) => upd({ bootGreeting: x })} /></Field>
+      <Field label="Greeting text" hint="Empty = “시스템 준비가 완료되었습니다.” / “AOP online.”"><Text value={v.bootGreetingText} onChange={(x) => upd({ bootGreetingText: x })} /></Field>
+      <Field label="Fallback Korean voice" hint="macOS speech"><Text value={v.ttsVoiceKo} onChange={(x) => upd({ ttsVoiceKo: x })} /></Field>
+      <Field label="Fallback English voice" hint="macOS speech"><Text value={v.ttsVoiceEn} onChange={(x) => upd({ ttsVoiceEn: x })} /></Field>
+      <Field label="Fallback speaking rate" hint="Words per minute (macOS speech only)"><Num value={v.ttsRate} onChange={(x) => upd({ ttsRate: x })} /></Field>
     </>
   )
 }
