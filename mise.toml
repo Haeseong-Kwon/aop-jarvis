@@ -1,0 +1,16 @@
+[tools]
+node = "24"
+rust = "stable"
+
+[tasks.setup]
+run = "pnpm install && scripts/setup-voice.sh"
+[tasks.dev]
+run = "pnpm dev"
+[tasks.typecheck]
+run = "pnpm typecheck"
+[tasks.test]
+run = "pnpm test"
+[tasks.check]
+run = "pnpm check"
+[tasks.build]
+run = "pnpm build"

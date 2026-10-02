@@ -1,0 +1,13 @@
+{
+  "name": "aop-jarvis",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.4.2",
+  "scripts": {
+    "dev": "pnpm --filter desktop tauri dev",
+    "build": "pnpm --filter desktop tauri build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "check": "pnpm typecheck && pnpm test && cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml"
+  }
+}
