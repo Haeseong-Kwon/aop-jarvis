@@ -5,7 +5,6 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 import type { AudioLevels } from '../audio/levels'
-import { createEnvironment } from './materials'
 import { BOOT_DONE, bootFrame, DEFAULT_TAU, EASE_TAU, lerpVisual, QUALITY, targetFps, VISUALS, type Quality, type Visual } from './params'
 import { AOPOrbScene, DEFAULT_DEBUG, type AgentVisual, type DebugFlags, type Telemetry } from './scene'
 import * as S from './shaders'
@@ -101,8 +100,6 @@ export class OrbRenderer {
     this.renderer.toneMapping = THREE.NoToneMapping // tone mapping happens once, in the composite pass
     this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace
     this.renderer.info.autoReset = false
-    this.scene.environment = createEnvironment(this.renderer)
-    this.scene.environmentIntensity = 1
 
     this.bg = new THREE.Mesh(
       new THREE.PlaneGeometry(1, 1),
@@ -173,12 +170,12 @@ export class OrbRenderer {
         uniforms: {
           tDiffuse: { value: null },
           tBloom: { value: null },
-          uBloom: { value: 1 },
-          uStreak: { value: 0.05 },
-          uExposure: { value: 0.92 },
-          uVignette: { value: 0.55 },
+          uBloom: { value: 0.9 },
+          uStreak: { value: 0.09 },
+          uExposure: { value: 1.05 },
+          uVignette: { value: 0.5 },
           uGrain: { value: 0.012 },
-          uCA: { value: 0.008 },
+          uCA: { value: 0.014 },
           uTime: { value: 0 },
           uTexel: { value: new THREE.Vector2(1 / w, 1 / h) },
           uAspect: { value: w / h },
@@ -195,7 +192,7 @@ export class OrbRenderer {
       this.bloomComposer.renderToScreen = false
       this.bloomComposer.setPixelRatio(this.dynamicRatio * preset.bloomScale)
       this.bloomComposer.addPass(new RenderPass(this.scene, this.camera))
-      this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w * preset.bloomScale, h * preset.bloomScale), preset.bloomStrength, 0.38, 0.0)
+      this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w * preset.bloomScale, h * preset.bloomScale), preset.bloomStrength, 0.4, 0.85)
       this.bloomComposer.addPass(this.bloomPass)
       this.bloomComposer.setSize(w, h)
     }
@@ -307,7 +304,7 @@ export class OrbRenderer {
       dt,
       v,
       boot,
-      out: env,
+      out: { ...env, bands: inputs.out.bands },
       mic: { level: micLevel, bands: inputs.mic.bands },
       ignite: this.ignite,
       scanAngle: this.scanAngle,
@@ -320,7 +317,7 @@ export class OrbRenderer {
 
     const cu = this.compositePass.uniforms
     cu.uTime!.value = this.time
-    cu.uStreak!.value = this.preset().streak ? 0.045 + boot.flare * 0.2 : 0
+    cu.uStreak!.value = this.preset().streak ? 0.08 + boot.flare * 0.3 + this.ignite * 0.08 : 0
   }
 
   /** Selective bloom: only objects tagged 'bloom' emit; opaque structure occludes as black; the rest is hidden. */
@@ -432,7 +429,6 @@ export class OrbRenderer {
     this.orb.dispose()
     this.bg.geometry.dispose()
     this.bg.material.dispose()
-    this.scene.environment?.dispose()
     this.renderer.dispose()
   }
 }

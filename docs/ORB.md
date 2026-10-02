@@ -1,208 +1,178 @@
 # AOP Orb
 
-The Orb is a real-time Three.js scene in `apps/desktop/src/orb/`. It is built as a physical optical instrument in 3D space: a machined O housing with a deep lens barrel, stacked glass, an iris, a segmented mechanical ring, A and P plates, and a precision HUD in front. Each frame it reads live state directly, without going through React: the runtime state and tasks from the store, the mic analyser, the speech-output analyser, and system telemetry.
+The Orb is a real-time Three.js scene in `apps/desktop/src/orb/`. It's a **holographic light construct** in the JARVIS idiom:
+- an arc-reactor core inside the O;
+- a live voice waveform;
+- eight counter-rotating ring layers;
+- a radar sweep;
+- shockwaves on speech;
+- the A and P drawn as light.
 
-![before / after](captures/compare-thinking.jpg)
+Everything is emissive. Each frame reads live state directly, without going through React: runtime state and tasks from the store, the mic analyser, the speech-output analyser, and system telemetry.
 
-## Why the old Orb looked primitive (audit)
-
-| Problem | Cause in the old `renderer.ts` |
+| Before (physical metal and glass) | After (holographic) |
 |---|---|
-| No depth, no parallax | `OrthographicCamera`; every object at `z = 0` |
-| Thin line art | Rings, A/P and ticks were `LineSegments` (1 px GL lines), additive |
-| No material definition | No lights, no environment map, no PBR materials |
-| Glass and lens were "drawn" | The core was one full-screen 2D shader |
-| Everything glowed | `UnrealBloomPass` over the whole frame (threshold 0.42) |
-| Star-field noise | 220–1600 particles at one depth |
-| A/P read as faint outlines | Polylines at 16–30 % alpha |
+| ![before](captures/holo/before-online.jpg) | ![after](captures/holo/online.jpg) |
+
+Per-state frames: `captures/holo/{online,speaking,thinking,executing}.jpg`. Boot: `captures/holo/boot-{1.2,2.0,2.6}.jpg`.
 
 ## Scene graph (`scene.ts`)
 
-Units: 1 = the O's outer radius; +z points at the camera.
+Units: orb units, where 1.0 is the O's outer radius. Layers sit at different depths (z) so the camera drift gives real parallax.
 
-```
-AOPOrbScene
-├── CoreAssembly                     z −0.95 … +0.12
-│   ├── EnergyNucleus   (billboard shader, z −0.62) + PointLight that lights the barrel interior
-│   ├── Aperture        9 extruded iris blades on pivots (z −0.42); opening = visual.aperture
-│   ├── RetainingRing01–04  lathe rings stepping inward with depth → lens barrel seen from the front
-│   ├── InnerMechanism  24 toothed sectors (InstancedMesh), contra-rotates while thinking
-│   ├── CoreGlass       front lens element (physical glass, transmission)
-│   ├── InnerLens       second element deeper in the barrel
-│   ├── InternalRefraction  emissive inner lens rim (mid-band speech response)
-│   ├── FineRadialTicks     72 emissive ticks (high-band speech response)
-│   ├── BackPlate + two annular reflection ghosts at different depths
-├── OpticalAssembly
-│   ├── OHousing        LatheGeometry profile: chamfered lip, recessed channel, inner lip, 0.96-deep bore
-│   ├── LensRing01      glass torus seated in the channel
-│   ├── ReflectiveRing  polished chrome
-│   ├── GlassCylinder   open cylinder with a fresnel shader (barrel edge visible on parallax)
-│   └── FresnelRing     energy transport ring (Ring 04)
-├── MechanicalAssembly
-│   ├── AFrame / PFrame extruded, bevelled plates behind the O (faces: graphite plate, sides: polished edge)
-│   ├── LightPath       emissive inlay strips: A's legs → O → P's top edge and bowl; pulses while agents run
-│   └── SegmentRing02   60 extruded sectors + 12 emissive inserts
-├── HUDAssembly (z +0.24)
-│   ├── RadialTicks     180 instanced ticks; mic bands lengthen them (user → outer ring)
-│   ├── DialRings / CalibrationMarks / alignment datums (merged geometry, 1 draw call each)
-│   ├── TargetingRing05 four arcs with brackets; local alert sector (approval amber / error red)
-│   ├── DataSegments    CPU and memory arc gauges bound to real telemetry
-│   ├── ScanMarker      only visible while thinking/executing
-│   └── Labels          canvas-texture planes: degree indices, STATE, CPU, MEM, AGENTS, R 1.000 / R 1.290
-├── EnergyAssembly      CoreGlow (front glare), Halo, LightSweep across the front glass
-├── ParticleAssembly    far (z −4…−1.6) · mid (optical band, flow-reactive) · near (rare, defocused)
-└── AgentOrbitAssembly  chrome beads + emissive node glow + link ribbons with travelling packets
-```
-
-### Ring families
-
-| Ring | Radius | Material | Motion |
-|---|---|---|---|
-| 01 glass optical | 0.832 | physical glass | fixed |
-| 02 mechanical segmented | 1.235–1.345 | dark metal + emissive inserts | only THINKING (−) / EXECUTING (+) |
-| 03 HUD radial | 1.72 | additive hairline quads | fixed; ticks react to the mic |
-| 04 energy transport | 1.018 | emissive shader | pulses travel inward (user) or outward (JARVIS) |
-| 05 external targeting | 2.06 | hairline + alert sector | only EXECUTING |
-| inner mechanism | 0.50–0.575 | dark metal | THINKING contra-rotation |
-
-Stillness is the default: in ONLINE nothing rotates except a 0.015 rad/s inner drift.
-
-## Materials (`materials.ts`)
-
-| Material | Model | Key properties |
+| Group | Contents | z |
 |---|---|---|
-| Housing (O) | `MeshPhysicalMaterial` | metalness 1, roughness 0.30, **circular anisotropy 0.6** (lathe UVs make the tangent circumferential), procedural lathe-groove normal map + banded roughness map, clearcoat 0.35 |
-| Plate (A/P faces) | physical | graphite 0x4a525e, metalness 0.5, roughness 0.42, micro-texture roughness |
-| Edge (A/P sides, iris) | physical | metalness 1, roughness 0.18 — catches the strip lights → bright edges |
-| Ring | physical | metalness 1, roughness 0.27, anisotropy 0.5 |
-| Interior | physical | near-black, roughness 0.45 — lit mostly by the nucleus point light |
-| Chrome | physical | roughness 0.07 |
-| Glass | physical | transmission 1, IOR 1.52, thickness 0.06, roughness 0.012, attenuation (ice), thin-film iridescence 0.28 (AR-coating sheen) |
-| Glass lite | physical | no transmission, opacity 0.12 — LOW quality, glass toggle, or adaptive fallback |
+| Core | Arc-reactor core quad (`holoShaders.core`): pin, white-hot centre, swirling domain-warped plasma inside the O, god rays, lit inner rim. Faint O band and bright O rim. Shockwave pool (6). Voice waveform ribbon + glow ribbon. | −0.05 … 0.05 |
+| Frames | A and P from `mark.ts` polylines: hologram fill (scanlines, hex lattice, travelling scan band), a 0.013 edge ribbon and a 0.06 glow ribbon. Edges draw on during boot; pulses travel along them, faster while agents run. | −0.1 |
+| Rings | Eight ring meshes (table below) on annulus geometry with `aU`/`aV`, all patterns procedural in `holoShaders.ring`. Three orbiting triangle markers. Radar sweep. | 0.04 … 0.24 |
+| HUD | Degree labels, title, state, CPU/MEM labels and gauges bound to real telemetry, agent count. | 0.3 |
+| Particles | Orbiting sparks (burst outward on speech, pulled in by the mic) and far dust. | −3 … 0.3 |
+| Agents | Hex node + glow per running agent at its fixed slot, link with travelling packets. | 0.02 |
 
-The environment is a procedural studio rendered once into a PMREM: a ring light behind the camera (circular highlights on round faces), two thin vertical strips (chamfer edges), a soft top key, faint floor bounce, cool rim from behind. Direct lights: nucleus point light (inside the barrel), a bounce light in front of the iris, a key light for the plates, a rim light.
+### Ring families (`RING_SPECS`)
 
-## Shaders (`shaders.ts`)
+| Ring | r | Pattern | Speed (rad/s × state spin) |
+|---|---|---|---|
+| EnergyRing | 1.085 | Solid with a travelling highlight; flashes with speech, cyan with the mic | 0 (the highlight flows) |
+| DashRing | 1.18 | 96 dashes | +0.32 |
+| ArcRing | 1.30 | 3 segmented arcs with highlight | −0.13 |
+| FringeRing | 1.36 | 240 fine ticks, major every 10 | −0.13 |
+| TickRing | 1.50 | 180 ticks, major every 15; brightens with the mic | +0.045 |
+| SegmentRing | 1.64 | 8 segments with a fast highlight; triangle markers orbit just outside | −0.075 |
+| HairRing | 1.79 | Hairline | 0 |
+| BracketRing | 2.00 | 4 brackets; carries the approval/error alert colour | +0.035 |
 
-| Shader | What it does |
+## Shaders (`holoShaders.ts`)
+
+| Shader | Role |
 |---|---|
-| `nucleus` | White-hot pinpoint → blue-white plasma → domain-warped fbm corona → shell → halo, all HDR. Low band breathes, onset ignites. Slow, low-amplitude turbulence: engineered, not fire. |
-| `energyRing` | Angle-based travelling bands; phase is integrated on the CPU so direction changes never jump. |
-| `strip` | A→O→P light path with draw-on reveal (boot) and a travelling pulse. |
-| `gauge` | Arc gauge with a lit fraction bound to a real value. |
-| `particles` | Three depth layers, radial flow driven by an integrated phase, depth-attenuated size, soft discs for the near layer. |
-| `link` | Agent link with per-slot intensity and packets while the agent runs. |
-| `fresnelShell` | Edge-only glass cylinder. |
-| `composite` | Final pass (below). |
+| `ring` | Modes: solid, dashes, ticks, segments. Anti-aliased with `fwidth`. Travelling highlight, angular draw-on with a hot leading edge, alert flicker. |
+| `ribbon` | Polyline light: soft cross-section, shimmer, two travelling pulses, draw-on head. Used for A/P edges and the waveform. |
+| `holoFill` | A/P hologram fill: scanlines, hex lattice, moving scan band. |
+| `core` | Arc-reactor core. `uFlash` is the JARVIS voice envelope. |
+| `shock` | Expanding ring front. |
+| `sweep` | Radar wedge with a sharp leading edge and banded trail. |
+| `sparks` | Point sprites with twinkle, speech burst and mic pull. |
+
+`shaders.ts` keeps the shared pieces: glow sprite, gauge, agent link, background and the composite pass.
+
+## Speech → core (the "JARVIS is talking" signal)
+
+The renderer turns the speech-output analyser into envelopes:
+
+| Envelope | Attack | Release | Source |
+|---|---|---|---|
+| level | 30 ms | 180 ms | RMS |
+| low, mid, high | 30 ms | 180 ms | Bands |
+
+The scene derives a **flash** envelope from that: 18 ms attack, 110 ms release. Every syllable produces a sharp pulse.
+
+| Flash drives | |
+|---|---|
+| Core | White-hot centre and god rays |
+| O rim and inner rim | |
+| EnergyRing | Brightness, plus highlight gain on every ring |
+| Spark burst | |
+| Onset | A rise of more than 0.1 above 0.18 emits a shockwave, rate-limited to one per 220 ms |
+| Waveform | The ribbon at r 1.085 is displaced by the real 8 output bands, mirror-symmetric with fine jitter |
+
+The waveform turns cyan and follows the mic bands when the user is the one talking.
+
+The flash is carried by thin, hot elements (rims, rays, shock fronts) rather than one large HDR blob. A large blob would flood the bloom and grey the frame.
 
 ## Post-processing (`renderer.ts`)
 
 ```
-Bloom pass (half res):  scene with every non-emissive mesh swapped to a black occluder,
-                        HUD / glass / particles hidden  →  UnrealBloomPass (threshold 0)
-Main pass (MSAA ×4):    full scene into a HalfFloat target (linear HDR, no tone mapping)
-Composite:              + bloom + anamorphic streak (bloom buffer only, 16 taps)
-                        → exposure 0.92 → ACES filmic → vignette → radial chromatic aberration (0.008)
-                        → sRGB → film grain (±0.006)
+Bloom pass (½ res):  bloom-tagged emitters only  →  UnrealBloomPass (strength preset, radius 0.4, threshold 0.85)
+Main pass (MSAA):    full scene into a HalfFloat target (linear HDR)
+Composite:           + bloom ×0.9 + anamorphic streak (0.08, flare/ignite boost)
+                     → exposure 1.05 → ACES → vignette 0.5 → chromatic aberration 0.014 → sRGB → grain
 ```
 
-Bloom is selective by construction: only objects tagged `bloom` (nucleus, energy ring, inner lens rim, fine ticks, segment inserts, light path, agent nodes and links, alert sector) can emit into it, and the opaque structure occludes them. No depth of field and no lens dirt (both judged not worth their cost or restraint).
+The bloom threshold is deliberately high. With eight ring layers, a low threshold summed every line into a grey haze. Now only hot cores, rims, highlights and flashes bloom.
 
 ## Camera rig
 
-`PerspectiveCamera` (30° FOV) fitted so the z = 0 plane matches the old 2.9 × 2.55 extent (DOM agent labels use the same math).
+`PerspectiveCamera` (30° FOV) fitted so the z = 0 plane matches the 2.9 × 2.55 extent (DOM agent labels use the same math).
 
 | Behaviour | Value |
 |---|---|
-| Idle orbital drift | yaw ±0.7°, pitch ±0.45° (23 s / 31 s periods) |
-| Breathing | distance ±0.25 % (9 s) |
-| Wake / LISTENING | push in 3.5 % |
-| THINKING | FOV −1.8 % (focus tightening) |
-| EXECUTING | +2.5 % distance, assemblies' z-spread ×1.12 (depth expansion) |
+| Idle drift | Sub-degree yaw/pitch drift, plus distance breathing |
+| LISTENING | Push in |
+| THINKING | FOV tightening |
+| EXECUTING | Depth expansion |
 
 ## State art direction (`params.ts`)
 
-All values ease toward targets (τ = 0.28 s; LISTENING 0.12 s so wake feels instant).
+All values ease toward their targets (τ = 0.28 s; LISTENING 0.12 s, SPEAKING 0.15 s).
 
 | State | Character |
 |---|---|
-| DORMANT | Almost black, faint metal silhouette (env 0.16), tiny nucleus, iris nearly closed, few particles |
-| BOOTING | See the cold-boot timeline |
-| ONLINE | Baseline; nothing moves except a slow inner drift |
-| LISTENING | Outer HUD ticks + energy ring react to the mic (cyan, inward flow); nucleus stable; camera push |
-| THINKING | Inner mechanism contra-rotates, mech ring counter-rotates, iris tightens, scan marker, FOV tightens, flow inward |
-| EXECUTING | Agent nodes and links separate from the O, packets travel to running agents, light-path pulse, targeting ring turns, depth expands |
-| SPEAKING | Nucleus breathes with the low band, inner lens rim with mids, fine ticks with highs, energy flows outward |
-| WAITING_APPROVAL | Amber alert sector only; mechanisms still |
-| ERROR | Red alert sector only, iris closes, nucleus dims — no full-screen red |
-
-Daily wake (DORMANT/ONLINE → LISTENING) fires a 220 ms ignition impulse (nucleus flash, energy ring, light sweep, slight push). It never replays the boot sequence.
+| DORMANT | Near-black, faint frames, slow spin |
+| ONLINE | Ice-cyan hologram, all rings turning, gentle sweep |
+| LISTENING | Cyan; tick and energy rings and the waveform follow the mic; sparks pulled in; spin ×1.5 |
+| THINKING | Spin ×2.8, strong radar sweep, faster plasma swirl, FOV tightens |
+| EXECUTING | Spin ×2, agent nodes and links, frame pulses speed up, depth expands |
+| SPEAKING | Per-syllable core flash, voice waveform, shockwaves on onsets, spark bursts |
+| WAITING_APPROVAL | Amber on the bracket ring, slow spin |
+| ERROR | Red on the bracket ring, slight flicker, slow spin |
+| SLEEP / ambient | Dim, slow |
 
 ### Cold-boot timeline (`BOOT`, seconds)
 
 | t | Visual |
 |---|---|
 | 0.2 | Seed point of light |
-| 0.7–1.7 | A and P slide forward from depth, reflections come up, inlay strips draw on |
-| 1.0–3.0 | O housing reflections, nucleus grows |
-| 1.2–1.8 | Iris opens, inner mechanisms light |
-| 1.8–2.5 | Rings activate outward by radius (inserts light sequentially) |
+| 0.7–1.7 | A/P edges draw on with light heads, frames slide forward from depth |
+| 1.0–3.0 | Core ignites |
+| 1.8–2.5 | Rings draw on angularly, outward by radius |
 | 2.0–3.0 | HUD |
-| 2.5 | Flare (streak + sweep) |
-| 3.4 | Interactive (readiness-gated as before) |
+| 2.5 | Flare, streak and a boot shockwave |
+| 3.4 | Interactive (readiness-gated) |
 
-Frames: `docs/captures/after/boot-*.jpg`. Developer › Graphics › *Replay cinematic boot* replays it on demand.
+## Quality presets
 
-## Audio reactivity
+| Preset | Pixel ratio cap | Bloom strength | Sparks | Max fps |
+|---|---|---|---|---|
+| LOW | 1 | off | 120 + 90 dust | 30 |
+| BALANCED | 1.5 | 0.65 | 270 + 150 | 60 |
+| HIGH (default) | 2 | 0.70 | 430 + 210 | 60 |
+| ULTRA | 3 | 0.75 | 650 + 330 | 120 |
 
-| Source | Feature | Drives |
-|---|---|---|
-| Speech output analyser (post-mastering, i.e. what is heard) | RMS, low (80–450 Hz) | Nucleus breathing, point-light intensity |
-| | mid (450 Hz–2.7 kHz) | Inner lens rim |
-| | high (2.7–8 kHz) | Fine radial ticks |
-| | onset after ≥220 ms quiet | Ignition impulse |
-| | release | 180 ms smooth decay |
-| Mic analyser | RMS + 8 bands (LISTENING only) | Outer HUD ticks, energy-ring inward pulses, mid particles flow inward |
-
-No synthetic amplitude exists in the app; when nothing plays, values decay to zero. (The Orb Lab capture harness uses a labelled synthetic envelope so screenshots of LISTENING/SPEAKING are possible.)
-
-## Quality presets and adaptive degradation
-
-| Preset | Pixel ratio cap | MSAA | Bloom | Transmission | Particles (far/mid/near) | Max fps |
-|---|---|---|---|---|---|---|
-| LOW | 1 | — | off | off (lite glass) | 30/40/0 | 30 |
-| BALANCED | 1.5 | 2 | 0.65, ½ res | ½ res | 50/70/3 | 60 |
-| HIGH (default) | 2 | 4 | 0.72, ½ res | ¾ res | 70/110/5 | 60 |
-| ULTRA | 3 | 4 | 0.75, ¾ res | full | 110/170/7 | 120 |
-
-Frame budget by state: DORMANT/SLEEP ≤ 20 fps, idle ONLINE ≤ 30 fps, otherwise the preset's max; hidden window stops rendering.
-
-Interface modes pick the quality: CINEMATIC and DEVELOPER use the configured preset, STANDARD caps at BALANCED, AMBIENT uses LOW at ≤ 24 fps.
-
-**Adaptive:** if the frame interval stays above 1.35× budget for 2.5 s, the internal pixel ratio drops by 0.25 (down to the preset floor); at the floor, transmission is replaced by lite glass. It steps back up after 8 s of headroom.
+- **Frame budget by state:** DORMANT/SLEEP ≤ 20 fps, idle ONLINE ≤ 30 fps, otherwise the preset maximum. A hidden window stops rendering.
+- **Adaptive pixel ratio:** if the frame interval stays above 1.35× budget for 2.5 s, the internal pixel ratio drops by 0.25.
+- **Measured:** the scene is about 37 k triangles and about 120 draw calls, versus about 300 k triangles before. On an M5 the CPU cost is under 0.5 ms per frame at a steady 60 fps.
 
 ## Debugging
 
-Developer › Graphics shows live fps, frame interval, CPU ms per frame, draw calls (all passes), triangles, programs, geometries, textures, particle count, pixel ratio and degradation state, plus toggles: depth layers (exploded view), ring IDs, particle bounds, bloom, particles, physical glass, freeze animation.
+**Developer › Graphics** shows live stats and toggles for:
+- depth layers (exploded view);
+- bloom;
+- particles;
+- freeze animation.
 
 **Orb Lab** (`apps/desktop/orb-lab.html`, dev only) renders the Orb without Tauri:
 
 ```bash
-pnpm --filter desktop dev                     # then open http://localhost:1420/orb-lab.html?state=THINKING
-node scripts/capture-orb.mjs docs/captures/after          # all states (PNG)
-STATES=THINKING node scripts/capture-orb.mjs out http://localhost:1420 "&debug=layers,ringIds"
-STATES=BOOTING node scripts/capture-orb.mjs out http://localhost:1420 "&bootT=1.6&snap=0"
-DSF=2 CLIP=440,210,400,400 STATES=SPEAKING node scripts/capture-orb.mjs out   # core close-up
+pnpm --filter desktop dev        # then open http://localhost:1420/orb-lab.html?state=SPEAKING
 ```
 
-URL params: `state`, `quality`, `agents=code,research`, `audio=speech|mic|none`, `debug=…,!bloom`, `bootT`, `snap=0`, `telemetry=0`.
+| URL param | |
+|---|---|
+| `state` | |
+| `quality` | |
+| `agents` | e.g. `code,research` |
+| `audio` | `speech`, `mic` or `none` |
+| `debug` | e.g. `!bloom,!particles,layers` |
+| `bootT` | |
+| `snap=0` | |
+| `telemetry=0` | |
 
-## Known differences from Concept 04 / limitations
+Lab audio is a labelled synthetic speech envelope so SPEAKING and LISTENING can be captured. The app only ever uses the real analysers.
 
-- **Concept 04 itself is not in the repository**, so the comparison above is against its written description, not pixels. Put the image at `docs/reference/orb-target.png`.
-- Captures were rendered by SwiftShader (software GL) in a Linux container. Transmission is sampled at ¾ resolution there, so thin glass highlights look slightly jagged; HUD text uses a fallback monospace font (SF Mono is macOS-only). The look on the Mac must be confirmed.
-- The nucleus reads as a strong glow with a hot centre; in SPEAKING it can wash the inner glass more than a concept frame would. Tune `nucleus` / `CoreGlow` against the real reference.
-- A/P plates are clearly structural now, but their faces are flat extrusions. A concept-art level of panel detail (seams, bolts, recesses) is not modelled.
-- No caustics or true volumetric scattering; the volume impression comes from layered additive shaders.
-- WebGL 2 only; WebGPU was not adopted (no quality gain worth the migration risk for this scene).
-- GPU time is not measured directly (WKWebView exposes no timer query). Frame interval is the proxy.
+## Limitations
+
+- The A/P fill is a flat hologram treatment. There's no volumetric depth inside the letters.
+- No true volumetric light; the depth impression comes from layered additive shaders, parallax and bloom.
+- Captures were taken in Chromium (Metal via ANGLE) through Orb Lab. The app runs the same WebGL 2 code in WKWebView.
+- GPU time isn't measured directly (no timer queries in WKWebView); the frame interval is the proxy.

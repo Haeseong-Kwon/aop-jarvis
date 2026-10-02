@@ -1,19 +1,6 @@
 // GLSL for the AOP Orb. Emissive shaders write HDR linear values; the composite pass tone-maps once.
 // Orb units: 1.0 = the O's outer radius.
 
-const NOISE = /* glsl */ `
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float noise(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  vec2 u = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
-}
-float fbm(vec2 p) {
-  float v = 0.0, a = 0.5;
-  for (int i = 0; i < 4; i++) { v += a * noise(p); p = p * 2.03 + 17.1; a *= 0.5; }
-  return v;
-}`
-
 /** Camera-facing quad (billboard) centred on the object origin; `position.xy` spans [-0.5, 0.5]. */
 const BILLBOARD_VERT = /* glsl */ `
 uniform float uSize;
@@ -25,43 +12,6 @@ void main() {
   gl_Position = projectionMatrix * mv;
 }`
 
-/**
- * Energy nucleus: white-hot point → blue-white plasma → layered corona → transparent halo.
- * Turbulence is slow, low-amplitude domain-warped fbm in polar space: controlled, engineered — not fire.
- */
-export const nucleus = {
-  vertex: BILLBOARD_VERT,
-  fragment: /* glsl */ `
-precision highp float;
-uniform float uTime; uniform float uIntensity; uniform float uLow; uniform float uIgnite; uniform float uPoint;
-uniform vec3 uColor;
-varying vec2 vP;
-${NOISE}
-void main() {
-  float r = length(vP);
-  if (r > 1.0) discard;
-  float a = atan(vP.y, vP.x);
-  float t = uTime;
-  vec2 polar = vec2(a * 1.5915, r);
-  float warp = fbm(vec2(a * 2.0 + t * 0.07, r * 3.0 - t * 0.21));
-  float turb = fbm(vec2(a * 3.0 + warp * 1.6 - t * 0.05, r * 7.0 - t * 0.45 + warp));
-  float breath = 1.0 + uLow * 0.55;
-
-  float pin = exp(-r * r * 900.0 / breath) * 40.0;
-  float hot = exp(-r * r * 160.0 / breath) * 6.0;
-  float plasma = exp(-r * r * 60.0 / breath) * (0.7 + 0.6 * turb) * 1.5;
-  float corona = exp(-r * 5.2) * smoothstep(0.38, 0.85, turb) * 0.9;
-  float shell = exp(-pow((r - 0.24 * breath) / 0.05, 2.0)) * (0.25 + 0.4 * warp) * 0.6;
-  float halo = exp(-r * 4.2) * 0.12;
-
-  vec3 ice = uColor;
-  vec3 col = vec3(1.0) * (pin + hot) + mix(ice, vec3(1.0), 0.45) * plasma + ice * (corona + shell + halo);
-  col *= uIntensity * (1.0 + uIgnite * 1.6);
-  col += vec3(1.0) * exp(-r * r * 3000.0) * uPoint * 40.0;
-  col *= smoothstep(1.0, 0.7, r);
-  gl_FragColor = vec4(col, 1.0);
-}`,
-}
 
 /** Soft additive glow sprite (core glare in front of the dome, ghosts, near bokeh). */
 export const glow = {
@@ -80,47 +30,7 @@ void main() {
 }`,
 }
 
-/**
- * Energy transport ring (thin torus). Pulses travel along the angle; direction encodes who is talking:
- * user → inward (cyan), JARVIS → outward (white-blue). uFlow > 0 = outward-moving bright bands.
- */
-export const energyRing = {
-  vertex: /* glsl */ `
-varying vec3 vPos;
-void main() { vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-  fragment: /* glsl */ `
-precision highp float;
-uniform float uTime; uniform float uLevel; uniform float uBase; uniform float uPhase; uniform float uReveal; uniform float uHigh;
-uniform vec3 uColor; uniform float uSegments;
-varying vec3 vPos;
-void main() {
-  float a = atan(vPos.y, vPos.x) / 6.2831853 + 0.5;
-  if (a > uReveal) discard;
-  float bands = pow(0.5 + 0.5 * sin((a * uSegments + uPhase) * 6.2831853), 6.0);
-  float fine = 0.5 + 0.5 * sin(a * 6.2831853 * 90.0 + uTime * 0.7);
-  float e = uBase * (0.55 + 0.45 * fine) + bands * uLevel * 2.2 + uHigh * fine * 1.4;
-  gl_FragColor = vec4(uColor * e, 1.0);
-}`,
-}
 
-/** Inlay light strips on A and P. A pulse can travel along the A → O → P path (aS = 0 → 1). */
-export const strip = {
-  vertex: /* glsl */ `
-attribute float aS;
-varying float vS;
-void main() { vS = aS; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-  fragment: /* glsl */ `
-precision highp float;
-uniform vec3 uColor; uniform float uBase; uniform float uReveal; uniform float uPulse; uniform float uPulsePos;
-varying float vS;
-void main() {
-  if (vS > uReveal) discard;
-  float head = smoothstep(uReveal - 0.05, uReveal, vS) * step(uReveal, 0.999) * 3.0;
-  float d = vS - uPulsePos;
-  float pulse = exp(-d * d * 900.0) * uPulse * 6.0;
-  gl_FragColor = vec4(uColor * (uBase + head + pulse), 1.0);
-}`,
-}
 
 /** HUD arc gauge: a RingGeometry sector whose lit fraction is bound to a real value (0..1). */
 export const gauge = {
@@ -140,42 +50,6 @@ void main() {
 }`,
 }
 
-/**
- * Particles in three depth layers. Radial flow is driven by a CPU-integrated phase so changing direction
- * never jumps. Size attenuates with depth; the near layer renders as large defocused discs.
- */
-export const particles = {
-  vertex: /* glsl */ `
-attribute float aSeed; attribute float aRadius; attribute float aAngle; attribute float aSpeed; attribute float aZ;
-uniform float uTime; uniform float uPhase; uniform float uRMin; uniform float uRMax; uniform float uFlowAmt;
-uniform float uSize; uniform float uPixelRatio; uniform float uViewH; uniform float uDensity;
-varying float vAlpha; varying float vSeed;
-void main() {
-  float span = uRMax - uRMin;
-  float flowR = uRMin + span * fract(aRadius + uPhase * (0.6 + aSpeed * 4.0));
-  float r = mix(uRMin + span * aRadius, flowR, uFlowAmt);
-  float ang = aAngle + uTime * aSpeed;
-  vec3 pos = vec3(cos(ang) * r, sin(ang) * r, aZ);
-  vec4 mv = modelViewMatrix * vec4(pos, 1.0);
-  gl_Position = projectionMatrix * mv;
-  float edge = smoothstep(0.0, 0.12, (r - uRMin) / span) * smoothstep(1.0, 0.75, (r - uRMin) / span);
-  vAlpha = mix(1.0, edge, uFlowAmt) * step(aSeed, uDensity);
-  vSeed = aSeed;
-  gl_PointSize = uSize * (0.55 + aSeed * 0.9) * uPixelRatio * uViewH / (-mv.z * 900.0);
-}`,
-  fragment: /* glsl */ `
-precision highp float;
-uniform vec3 uColor; uniform float uAlpha; uniform float uTime; uniform float uSoft;
-varying float vAlpha; varying float vSeed;
-void main() {
-  vec2 c = gl_PointCoord - 0.5;
-  float d = length(c) * 2.0;
-  if (d > 1.0) discard;
-  float disc = mix(exp(-d * d * 7.0), smoothstep(1.0, 0.6, d) * 0.6 + exp(-d * d * 4.0) * 0.4, uSoft);
-  float twinkle = 0.75 + 0.25 * sin(uTime * (0.7 + vSeed * 1.7) + vSeed * 40.0);
-  gl_FragColor = vec4(uColor * disc * uAlpha * vAlpha * twinkle, 1.0);
-}`,
-}
 
 /** Agent link: O rim → agent node. An energy packet travels outward while the agent runs. */
 export const link = {
@@ -256,22 +130,3 @@ void main() {
 }`,
 }
 
-/** Cheap fresnel shell for the outer glass cylinder (edges catch light, faces stay clear). */
-export const fresnelShell = {
-  vertex: /* glsl */ `
-varying vec3 vN; varying vec3 vV;
-void main() {
-  vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  vN = normalize(normalMatrix * normal);
-  vV = normalize(-mv.xyz);
-  gl_Position = projectionMatrix * mv;
-}`,
-  fragment: /* glsl */ `
-precision highp float;
-uniform vec3 uColor; uniform float uIntensity;
-varying vec3 vN; varying vec3 vV;
-void main() {
-  float f = pow(1.0 - abs(dot(normalize(vN), normalize(vV))), 4.0);
-  gl_FragColor = vec4(uColor * f * uIntensity, 1.0);
-}`,
-}

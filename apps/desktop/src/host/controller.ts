@@ -12,7 +12,7 @@ const METRICS_INTERVAL_MS = 2000
 const AMBIENT_SIZE = 240
 const BOOT_AUDIO_TAIL_MS = 8000
 /** Music keeps playing this long after the greeting before fading out. */
-const GREETING_MUSIC_TAIL_MS = 4000
+const GREETING_MUSIC_TAIL_MS = 9000
 const GREETING_VOICE_WAIT_MS = 10_000
 
 /** Owns the runtime and every host resource (mic, speakers, hotkey, window). The UI only calls its actions. */
@@ -182,7 +182,8 @@ export class Controller {
     const cfg = this.rt.getConfig()
     const fadeMusic = (afterMs: number) => setTimeout(() => this.bootAudio.fadeOut(cfg.boot.fadeOutMs), afterMs)
     if (!cfg.voice.enabled) return void fadeMusic(BOOT_AUDIO_TAIL_MS)
-    await this.startMic(cfg.voice.inputDeviceId)
+    // Don't await the mic: a pending macOS permission prompt would otherwise hold back the greeting.
+    void this.startMic(cfg.voice.inputDeviceId)
     // The music plays under the greeting (ducked) and fades out after it, instead of cutting it off on a timer.
     const greeted = await this.greet()
     fadeMusic(greeted ? GREETING_MUSIC_TAIL_MS : BOOT_AUDIO_TAIL_MS)

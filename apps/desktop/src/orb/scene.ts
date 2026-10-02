@@ -1,13 +1,14 @@
-// AOPOrbScene — the Orb as a physical optical instrument: real Z-depth layers, differentiated materials,
-// emissive energy only where it means something. The renderer owns the camera, post chain and loop;
-// this module owns the scene graph and per-frame art direction.
+// AOPOrbScene — the Orb as a holographic light construct (JARVIS-style): an arc-reactor core inside the O,
+// a live voice waveform, seven counter-rotating ring families, radar sweep, shockwaves on speech, and the
+// A/P structure drawn as light. The renderer owns camera, post chain and loop; this module owns the scene
+// graph and per-frame art direction. Every motion is bound to real state or real audio.
 import type { AgentId } from '@aop/core'
 import * as THREE from 'three'
-import { annularSector, arcBand, hairline, irisBlade, lathe, lensElement, markGeometry, O_PROFILE, retainingRing } from './geometry'
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import { arcBand } from './geometry'
 import { HudLabel } from './hudText'
-import { createMaterials, type OrbMaterials } from './materials'
+import { markPolylines, O_INNER_RATIO } from './mark'
 import type { BootFrame, QualityPreset, Visual } from './params'
+import * as H from './holoShaders'
 import * as S from './shaders'
 
 export type AgentVisualStatus = 'queued' | 'running' | 'waiting' | 'failed' | 'completed'
@@ -27,9 +28,6 @@ export const AGENT_SLOTS: Record<AgentId, number> = {
 }
 export const ORBIT_RADIUS = 2.25
 const SLOT_IDS = Object.keys(AGENT_SLOTS) as AgentId[]
-
-/** Radii of the five ring families (orb units). */
-export const RINGS = { glass: 0.832, energy: 1.018, chrome: 1.135, mech: 1.29, hud: 1.72, dial: 1.86, target: 2.06 }
 
 export interface Telemetry {
   cpu: number
@@ -54,8 +52,8 @@ export interface SceneFrame {
   dt: number
   v: Visual
   boot: BootFrame
-  /** JARVIS output: rms + low/mid/high band energies from the playback analyser (0..1). */
-  out: { level: number; low: number; mid: number; high: number }
+  /** JARVIS output: rms + low/mid/high envelopes (0..1) and the raw 8 analyser bands. */
+  out: { level: number; low: number; mid: number; high: number; bands: Float32Array }
   /** User input: rms level (already gated by state) + 8 bands from the mic analyser. */
   mic: { level: number; bands: Float32Array }
   /** Speech-onset / wake ignition impulse (decays). */
@@ -68,354 +66,314 @@ export interface SceneFrame {
   viewHeight: number
 }
 
-type Tag = 'bloom' | 'hide' | 'occluder'
+type Tag = 'bloom' | 'hide'
 const tag = <T extends THREE.Object3D>(o: T, t: Tag): T => {
   o.userData.orb = t
   return o
 }
-
+const clamp01 = (x: number) => Math.min(1, Math.max(0, x))
 const additive = (shader: { vertex: string; fragment: string }, uniforms: Record<string, THREE.IUniform>): THREE.ShaderMaterial =>
-  new THREE.ShaderMaterial({ vertexShader: shader.vertex, fragmentShader: shader.fragment, uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })
+  new THREE.ShaderMaterial({ vertexShader: shader.vertex, fragmentShader: shader.fragment, uniforms, transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide })
 
-const hudBasic = (): THREE.MeshBasicMaterial => new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide })
-
-const merge = (geos: THREE.BufferGeometry[]): THREE.BufferGeometry => {
-  const g = mergeGeometries(geos.map((x) => (x.index ? x.toNonIndexed() : x)))
-  geos.forEach((x) => x.dispose())
+/** Annulus with aU (angle 0..1 over [a0, a1]) and aV (0 inner … 1 outer). */
+function annulus(r: number, width: number, segments = 512, a0 = 0, a1 = Math.PI * 2): THREE.BufferGeometry {
+  const pos: number[] = []
+  const u: number[] = []
+  const v: number[] = []
+  const idx: number[] = []
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments
+    const a = a0 + (a1 - a0) * t
+    for (const [k, rr] of [
+      [0, r - width / 2],
+      [1, r + width / 2],
+    ] as const) {
+      pos.push(Math.cos(a) * rr, Math.sin(a) * rr, 0)
+      u.push(t)
+      v.push(k)
+    }
+    if (i < segments) {
+      const b = i * 2
+      idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2)
+    }
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setAttribute('aU', new THREE.Float32BufferAttribute(u, 1))
+  g.setAttribute('aV', new THREE.Float32BufferAttribute(v, 1))
+  g.setIndex(idx)
   return g
 }
 
-const clamp01 = (x: number) => Math.min(1, Math.max(0, x))
+type V2 = [number, number]
+/** Ribbon along a polyline with aS (arc length 0..1) and aSide (−1 … +1). */
+function polylineRibbon(points: V2[], width: number, closed: boolean): THREE.BufferGeometry {
+  const pts = closed ? [...points, points[0]!] : points
+  const lens = [0]
+  for (let i = 1; i < pts.length; i++) lens.push(lens[i - 1]! + Math.hypot(pts[i]![0] - pts[i - 1]![0], pts[i]![1] - pts[i - 1]![1]))
+  const total = lens[lens.length - 1]!
+  const pos: number[] = []
+  const s: number[] = []
+  const side: number[] = []
+  const idx: number[] = []
+  pts.forEach((p, i) => {
+    const prev = pts[Math.max(0, i - 1)]!
+    const next = pts[Math.min(pts.length - 1, i + 1)]!
+    let tx = next[0] - prev[0]
+    let ty = next[1] - prev[1]
+    const l = Math.hypot(tx, ty) || 1
+    tx /= l
+    ty /= l
+    const nx = -ty * (width / 2)
+    const ny = tx * (width / 2)
+    pos.push(p[0] + nx, p[1] + ny, 0, p[0] - nx, p[1] - ny, 0)
+    s.push(lens[i]! / total, lens[i]! / total)
+    side.push(1, -1)
+    if (i < pts.length - 1) {
+      const b = i * 2
+      idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2)
+    }
+  })
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setAttribute('aS', new THREE.Float32BufferAttribute(s, 1))
+  g.setAttribute('aSide', new THREE.Float32BufferAttribute(side, 1))
+  g.setIndex(idx)
+  return g
+}
 
-interface ParticleLayer {
-  points: THREE.Points
-  mat: THREE.ShaderMaterial
-  rMin: number
-  rMax: number
-  phase: number
-  bounds: THREE.Box3Helper
+interface RingSpec {
+  name: string
+  r: number
+  width: number
+  mode: 0 | 1 | 2 | 3
+  count?: number
+  duty?: number
+  major?: number
+  /** Base angular speed (rad/s); multiplied by the state's spin. */
+  speed: number
+  z: number
+  /** Brightness relative to the ring family. */
+  gain: number
+  hl?: { speed: number; width: number; gain: number }
+  core?: number
+}
+
+// Seven ring families, inside → out. Alternating directions and speeds create the layered JARVIS motion.
+const RING_SPECS: RingSpec[] = [
+  { name: 'EnergyRing', r: 1.085, width: 0.012, mode: 0, speed: 0, z: 0.04, gain: 1.4, hl: { speed: 0.55, width: 0.06, gain: 3 }, core: 1.2 },
+  { name: 'DashRing', r: 1.18, width: 0.022, mode: 1, count: 96, duty: 0.55, speed: 0.32, z: 0.07, gain: 0.9 },
+  { name: 'ArcRing', r: 1.3, width: 0.05, mode: 3, count: 3, duty: 0.78, speed: -0.13, z: 0.1, gain: 0.55, hl: { speed: -0.13, width: 0.08, gain: 1.6 } },
+  { name: 'FringeRing', r: 1.36, width: 0.03, mode: 2, count: 240, duty: 0.3, major: 10, speed: -0.13, z: 0.1, gain: 0.8 },
+  { name: 'TickRing', r: 1.5, width: 0.06, mode: 2, count: 180, duty: 0.22, major: 15, speed: 0.045, z: 0.14, gain: 0.9 },
+  { name: 'SegmentRing', r: 1.64, width: 0.014, mode: 3, count: 8, duty: 0.86, speed: -0.075, z: 0.17, gain: 1, hl: { speed: 0.22, width: 0.05, gain: 2.4 } },
+  { name: 'HairRing', r: 1.79, width: 0.005, mode: 0, speed: 0, z: 0.2, gain: 0.9, core: 0.6 },
+  { name: 'BracketRing', r: 2.0, width: 0.016, mode: 3, count: 4, duty: 0.3, speed: 0.035, z: 0.24, gain: 1.1 },
+]
+
+const WAVE_POINTS = 240
+const SHOCKS = 6
+
+interface Shock {
+  mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>
+  age: number
+  strength: number
 }
 
 export class AOPOrbScene {
   readonly root = new THREE.Group()
-  readonly mats: OrbMaterials
-  readonly core = new THREE.Group()
-  readonly optical = new THREE.Group()
-  readonly mechanical = new THREE.Group()
-  readonly hud = new THREE.Group()
-  readonly energy = new THREE.Group()
-  readonly particleGroup = new THREE.Group()
-  readonly agentGroup = new THREE.Group()
-  /** Meshes that use physical glass; swapped to the lite material when transmission is off. */
-  readonly glassMeshes: THREE.Mesh[] = []
-  readonly debugGroup = new THREE.Group()
+  /** The renderer swaps non-bloom meshes to `occluder` during the bloom pass. */
+  readonly mats: { occluder: THREE.MeshBasicMaterial }
+  private coreGroup = new THREE.Group()
+  private ringGroup = new THREE.Group()
+  private frameGroup = new THREE.Group()
+  private hud = new THREE.Group()
+  private particleGroup = new THREE.Group()
+  private agentGroup = new THREE.Group()
+  private debugGroup = new THREE.Group()
 
-  private nucleusMat: THREE.ShaderMaterial
-  private nucleusLight: THREE.PointLight
-  private bounceLight: THREE.PointLight
-  private keyLight: THREE.DirectionalLight
-  private rimLight: THREE.DirectionalLight
-  private blades: THREE.Mesh[] = []
-  private innerMech: THREE.InstancedMesh
-  private mechRing = new THREE.Group()
-  private inserts: THREE.InstancedMesh
-  private insertColor = new THREE.Color()
-  private lensRim: THREE.ShaderMaterial
-  private energyRing: THREE.ShaderMaterial
-  private energyPhase = 0
-  private fineTicks: THREE.InstancedMesh
-  private fineTickMat: THREE.MeshBasicMaterial
-  private ghosts: THREE.ShaderMaterial[] = []
-  private glare: THREE.ShaderMaterial
-  private halo: THREE.ShaderMaterial
+  private coreMat: THREE.ShaderMaterial
+  private oRingMat: THREE.ShaderMaterial
+  private oRingOuterMat: THREE.ShaderMaterial
+  private rings: { spec: RingSpec; mesh: THREE.Mesh; mat: THREE.ShaderMaterial; hl: number }[] = []
+  private markers: THREE.Group
+  private markerMat: THREE.MeshBasicMaterial
   private sweepMat: THREE.ShaderMaterial
-  private shellMat: THREE.ShaderMaterial
-  private stripMat: THREE.ShaderMaterial
-  private marks: THREE.Group
-  private ticks: THREE.InstancedMesh
-  private tickMat: THREE.MeshBasicMaterial
-  private dialMat = hudBasic()
-  private dialInnerMat = hudBasic()
-  private target = new THREE.Group()
-  private targetMat = hudBasic()
-  private alertMat: THREE.MeshBasicMaterial
-  private scanMarker: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>
+  private wave: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>
+  private waveGlow: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>
+  private waveAmp = new Float32Array(WAVE_POINTS)
+  private shocks: Shock[] = []
+  private nextShock = 0
+  private frameEdgeMat: THREE.ShaderMaterial
+  private frameGlowMat: THREE.ShaderMaterial
+  private frameFillMat: THREE.ShaderMaterial
+  private framePulse = 0
+  private flash = 0
+  private prevOut = 0
+  private shockCooldown = 0
+  private bootFlareFired = false
   private cpuGauge: THREE.ShaderMaterial
   private memGauge: THREE.ShaderMaterial
-  private labels: { deg: HudLabel[]; title: HudLabel; state: HudLabel; cpu: HudLabel; mem: HudLabel; agents: HudLabel; calib: HudLabel[] }
-  private ringIdLabels: HudLabel[] = []
-  private particleLayers: ParticleLayer[] = []
-  private nodeBeads: THREE.Mesh[] = []
+  private labels: { deg: HudLabel[]; title: HudLabel; state: HudLabel; cpu: HudLabel; mem: HudLabel; agents: HudLabel }
+  private labelClock = 0
+  private sparks: { points: THREE.Points; mat: THREE.ShaderMaterial; far: boolean }[] = []
   private nodeGlows: THREE.ShaderMaterial[] = []
+  private nodeRings: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>[] = []
   private linkMat: THREE.ShaderMaterial
   private agentIntensity = new Map<AgentId, number>()
-  private labelClock = 0
-  private stripPulse = 0
-  private tmpM = new THREE.Matrix4()
-  private tmpQ = new THREE.Quaternion()
-  private tmpV = new THREE.Vector3()
-  private tmpS = new THREE.Vector3()
 
   constructor(preset: QualityPreset) {
-    this.mats = createMaterials()
-    this.root.add(this.core, this.optical, this.mechanical, this.hud, this.energy, this.particleGroup, this.agentGroup, this.debugGroup)
+    this.mats = { occluder: new THREE.MeshBasicMaterial({ color: 0x000000 }) }
     this.root.name = 'AOPOrbScene'
-    this.core.name = 'CoreAssembly'
-    this.optical.name = 'OpticalAssembly'
-    this.mechanical.name = 'MechanicalAssembly'
-    this.hud.name = 'HUDAssembly'
-    this.energy.name = 'EnergyAssembly'
-    this.particleGroup.name = 'ParticleAssembly'
-    this.agentGroup.name = 'AgentOrbitAssembly'
-    const m = this.mats
+    this.root.add(this.coreGroup, this.frameGroup, this.ringGroup, this.hud, this.particleGroup, this.agentGroup, this.debugGroup)
+    const ice = () => new THREE.Color(0.62, 0.86, 1)
 
-    // ---------------------------------------------------------------- CoreAssembly
-    this.nucleusMat = additive(S.nucleus, {
-      uSize: { value: 0.95 },
+    // ------------------------------------------------------------- Core: arc reactor inside the O
+    this.coreMat = additive(H.core, {
+      uSize: { value: 2.0 },
       uTime: { value: 0 },
       uIntensity: { value: 0 },
-      uLow: { value: 0 },
+      uFlash: { value: 0 },
       uIgnite: { value: 0 },
       uPoint: { value: 0 },
-      uColor: { value: new THREE.Color(0.62, 0.82, 1) },
+      uSwirl: { value: 0.3 },
+      uInner: { value: O_INNER_RATIO },
+      uLow: { value: 0 },
+      uColor: { value: ice() },
     })
-    const nucleus = tag(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.nucleusMat), 'bloom')
-    nucleus.name = 'EnergyNucleus'
-    nucleus.position.z = -0.62
-    nucleus.frustumCulled = false
-    nucleus.renderOrder = 2
-    this.nucleusLight = new THREE.PointLight(0xbcd8ff, 0, 0, 2)
-    this.nucleusLight.position.z = -0.5
-    // Light reflected forward off the inner lens: lets the iris blades and retaining rings read from the front.
-    this.bounceLight = new THREE.PointLight(0xbcd8ff, 0, 0, 2)
-    this.bounceLight.position.z = -0.18
-    this.core.add(nucleus, this.nucleusLight, this.bounceLight)
-    // Studio key (top-left, in front) gives the A/P plates a readable gradient; cool rim from behind-right.
-    this.keyLight = new THREE.DirectionalLight(0xe6efff, 0)
-    this.keyLight.position.set(-3, 3.5, 4)
-    this.rimLight = new THREE.DirectionalLight(0xa8c8ff, 0)
-    this.rimLight.position.set(4, 1.5, -3)
-    this.root.add(this.keyLight, this.rimLight)
-
-    // Aperture: nine blades pivoting on the bore wall.
-    const aperture = new THREE.Group()
-    aperture.name = 'Aperture'
-    aperture.position.z = -0.42
-    const bladeGeo = irisBlade()
-    for (let i = 0; i < 9; i++) {
-      const pivot = new THREE.Group()
-      const th = (i / 9) * Math.PI * 2
-      pivot.position.set(Math.cos(th) * 0.6, Math.sin(th) * 0.6, i * 0.0011)
-      pivot.rotation.z = th
-      const blade = new THREE.Mesh(bladeGeo, m.edge)
-      pivot.add(blade)
-      this.blades.push(blade)
-      aperture.add(pivot)
-    }
-    this.core.add(aperture)
-
-    // Stepped bore: retaining rings narrowing with depth read as a lens barrel seen from the front.
-    const rr = [
-      [-0.12, 0.605],
-      [-0.33, 0.57],
-      [-0.6, 0.52],
-      [-0.8, 0.49],
-    ] as const
-    rr.forEach(([z, inner], i) => {
-      const ring = new THREE.Mesh(retainingRing(z, inner, 0.035 + i * 0.01), i % 2 ? m.interior : m.ring)
-      ring.name = `RetainingRing0${i + 1}`
-      this.core.add(ring)
-    })
-    const backPlate = new THREE.Mesh(new THREE.CircleGeometry(0.647, 96), m.interior)
-    backPlate.position.z = -0.95
-    backPlate.name = 'BackPlate'
-    this.core.add(backPlate)
-
-    // Inner mechanism: toothed ring between the glass elements, contra-rotating while thinking.
-    this.innerMech = new THREE.InstancedMesh(annularSector(0.5, 0.575, ((Math.PI * 2) / 24) * 0.55, 0.026, 0.002), m.ring, 24)
-    this.innerMech.name = 'InnerMechanism'
-    this.innerMech.position.z = -0.22
-    for (let i = 0; i < 24; i++) {
-      this.tmpM.makeRotationZ((i / 24) * Math.PI * 2)
-      this.innerMech.setMatrixAt(i, this.tmpM)
-    }
-    this.core.add(this.innerMech)
-
-    // Stacked glass: front element at the bore mouth, second element deeper.
-    const lens1 = new THREE.Mesh(lensElement(0.652, 0.11, 0.022, 1), m.glass)
-    lens1.position.z = 0.015
-    lens1.name = 'CoreGlass'
-    const lens2 = new THREE.Mesh(lensElement(0.585, 0.06, 0.02, 1.4, -0.6), m.glass)
-    lens2.position.z = -0.29
-    lens2.name = 'InnerLens'
-    this.glassMeshes.push(lens1, lens2)
-    tag(lens1, 'hide')
-    tag(lens2, 'hide')
-    this.core.add(lens1, lens2)
-
-    // Inner lens rim (mid-band speech response) and fine radial ticks (high-band response).
-    this.lensRim = additive(S.energyRing, {
-      uTime: { value: 0 },
-      uLevel: { value: 0 },
-      uBase: { value: 0 },
-      uPhase: { value: 0 },
+    const coreMesh = tag(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.coreMat), 'bloom')
+    coreMesh.name = 'ArcReactorCore'
+    coreMesh.position.z = -0.05
+    coreMesh.frustumCulled = false
+    // The O itself: a luminous band between the inner and outer radius, with a bright outer rim.
+    const ringUniforms = (mode: number, intensity: number) => ({
+      uColor: { value: ice() },
+      uIntensity: { value: intensity },
+      uMode: { value: mode },
+      uCount: { value: 1 },
+      uDuty: { value: 1 },
+      uMajor: { value: 1 },
       uReveal: { value: 1 },
-      uHigh: { value: 0 },
-      uSegments: { value: 6 },
-      uColor: { value: new THREE.Color(0.75, 0.88, 1) },
-    })
-    const rim = tag(new THREE.Mesh(new THREE.TorusGeometry(0.662, 0.0026, 8, 256), this.lensRim), 'bloom')
-    rim.position.z = 0.072
-    rim.name = 'InternalRefraction'
-    this.core.add(rim)
-    this.fineTickMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })
-    this.fineTicks = tag(new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), this.fineTickMat, 72), 'bloom')
-    this.fineTicks.position.z = -0.09
-    this.fineTicks.name = 'FineRadialTicks'
-    this.core.add(this.fineTicks)
-
-    // Internal reflections: two faint annular ghosts at different depths (they slide with parallax).
-    ;[
-      [-0.18, 0.95, 0.05],
-      [-0.48, 0.62, 0.035],
-    ].forEach(([z, size, intensity]) => {
-      const g = additive(S.glow, { uSize: { value: size }, uColor: { value: new THREE.Color(0.7, 0.85, 1) }, uIntensity: { value: intensity }, uFalloff: { value: 4 }, uRing: { value: 1 } })
-      g.userData.base = intensity
-      const ghost = tag(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), g), 'hide')
-      ghost.position.z = z!
-      ghost.frustumCulled = false
-      this.ghosts.push(g)
-      this.core.add(ghost)
-    })
-
-    // ---------------------------------------------------------------- OpticalAssembly
-    const housing = new THREE.Mesh(lathe(O_PROFILE, 200), m.housing)
-    housing.name = 'OHousing'
-    const glassRing = new THREE.Mesh(new THREE.TorusGeometry(RINGS.glass, 0.024, 24, 220), m.glass)
-    glassRing.position.z = 0.07
-    glassRing.name = 'LensRing01'
-    this.glassMeshes.push(glassRing)
-    tag(glassRing, 'hide')
-    const chrome = new THREE.Mesh(new THREE.TorusGeometry(RINGS.chrome, 0.0055, 10, 280), m.chrome)
-    chrome.name = 'ReflectiveRing'
-    chrome.position.z = -0.01
-    this.shellMat = additive(S.fresnelShell, { uColor: { value: new THREE.Color(0.65, 0.8, 1) }, uIntensity: { value: 0.3 } })
-    this.shellMat.side = THREE.DoubleSide
-    const shellGeo = new THREE.CylinderGeometry(1.19, 1.19, 0.42, 160, 1, true)
-    shellGeo.rotateX(Math.PI / 2)
-    const shell = tag(new THREE.Mesh(shellGeo, this.shellMat), 'hide')
-    shell.position.z = -0.12
-    shell.name = 'GlassCylinder'
-    this.energyRing = additive(S.energyRing, {
+      uHl: { value: 0 },
+      uHlWidth: { value: 0.05 },
+      uHlGain: { value: 0 },
+      uFlicker: { value: 0 },
       uTime: { value: 0 },
-      uLevel: { value: 0 },
-      uBase: { value: 0 },
-      uPhase: { value: 0 },
-      uReveal: { value: 1 },
-      uHigh: { value: 0 },
-      uSegments: { value: 5 },
-      uColor: { value: new THREE.Color(0.7, 0.86, 1) },
+      uCore: { value: 0 },
     })
-    const fresnelRing = tag(new THREE.Mesh(new THREE.TorusGeometry(RINGS.energy, 0.0034, 8, 360), this.energyRing), 'bloom')
-    fresnelRing.position.z = 0.035
-    fresnelRing.name = 'FresnelRing'
-    this.optical.add(housing, glassRing, chrome, shell, fresnelRing)
+    this.oRingMat = additive(H.ring, ringUniforms(0, 0))
+    const oBand = tag(new THREE.Mesh(annulus((1 + O_INNER_RATIO) / 2, 1 - O_INNER_RATIO, 512), this.oRingMat), 'bloom')
+    oBand.name = 'OBand'
+    this.oRingOuterMat = additive(H.ring, ringUniforms(0, 0))
+    const oRim = tag(new THREE.Mesh(annulus(1.0, 0.014, 512), this.oRingOuterMat), 'bloom')
+    oRim.name = 'ORim'
+    oRim.position.z = 0.01
+    this.coreGroup.add(coreMesh, oBand, oRim)
 
-    // ---------------------------------------------------------------- MechanicalAssembly
-    const mark = markGeometry()
-    this.marks = new THREE.Group()
-    this.marks.name = 'AOPFrames'
-    const aFrame = new THREE.Mesh(mark.a, [m.plate, m.edge])
-    aFrame.name = 'AFrame'
-    const pFrame = new THREE.Mesh(mark.p, [m.plate, m.edge])
-    pFrame.name = 'PFrame'
-    this.stripMat = additive(S.strip, { uColor: { value: new THREE.Color(0.7, 0.86, 1) }, uBase: { value: 0 }, uReveal: { value: 0 }, uPulse: { value: 0 }, uPulsePos: { value: 0 } })
-    const strips = tag(new THREE.Mesh(mark.strips, this.stripMat), 'bloom')
-    strips.position.z = 0.003
-    strips.name = 'LightPath'
-    this.marks.add(aFrame, pFrame, strips)
-    this.marks.position.z = -0.04
-    this.mechanical.add(this.marks)
+    // Shockwaves (pool).
+    for (let i = 0; i < SHOCKS; i++) {
+      const mat = additive(H.shock, { uSize: { value: 6 }, uRadius: { value: 1 }, uAlpha: { value: 0 }, uWidth: { value: 0.012 }, uColor: { value: ice() } })
+      const mesh = tag(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat), 'bloom')
+      mesh.frustumCulled = false
+      mesh.position.z = 0.02
+      this.shocks.push({ mesh, age: 1, strength: 0 })
+      this.coreGroup.add(mesh)
+    }
 
-    this.mechRing.name = 'SegmentRing02'
-    this.mechRing.position.z = -0.045
-    const segs = new THREE.InstancedMesh(annularSector(1.235, 1.345, ((Math.PI * 2) / 60) * 0.84, 0.05, 0.004), m.ring, 60)
-    for (let i = 0; i < 60; i++) {
-      this.tmpM.makeRotationZ((i / 60) * Math.PI * 2)
-      segs.setMatrixAt(i, this.tmpM)
-    }
-    this.inserts = tag(new THREE.InstancedMesh(new THREE.BoxGeometry(0.06, 0.012, 0.004), new THREE.MeshBasicMaterial({ color: 0xffffff }), 12), 'bloom')
-    for (let i = 0; i < 12; i++) {
-      const a = (i / 12) * Math.PI * 2
-      this.tmpM.compose(this.tmpV.set(Math.cos(a) * RINGS.mech, Math.sin(a) * RINGS.mech, 0.031), this.tmpQ.setFromAxisAngle(new THREE.Vector3(0, 0, 1), a), this.tmpS.set(1, 1, 1))
-      this.inserts.setMatrixAt(i, this.tmpM)
-      this.inserts.setColorAt(i, this.insertColor.setRGB(0, 0, 0))
-    }
-    this.mechRing.add(segs, this.inserts)
-    this.mechanical.add(this.mechRing)
-
-    // ---------------------------------------------------------------- HUDAssembly
-    this.hud.position.z = 0.24
-    this.tickMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })
-    this.ticks = tag(new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), this.tickMat, 180), 'hide')
-    this.ticks.name = 'RadialTicks'
-    for (let i = 0; i < 180; i++) this.ticks.setColorAt(i, new THREE.Color().setScalar(i % 15 === 0 ? 1 : 0.42))
-    // Static HUD linework is merged per material (one draw call each).
-    const dialGeos: THREE.BufferGeometry[] = [arcBand(1.705, 0.0032, 0, Math.PI * 2, 512)]
-    for (let i = 0; i < 8; i++) {
-      const a0 = (i / 8) * Math.PI * 2 + 0.06
-      dialGeos.push(arcBand(RINGS.dial, 0.0026, a0, a0 + Math.PI / 4 - 0.12, 128))
-    }
-    // Alignment datums left/right and top/bottom, with end marks.
-    dialGeos.push(
-      hairline(-2.62, 0, -2.2, 0, 0.0026),
-      hairline(2.2, 0, 2.62, 0, 0.0026),
-      hairline(-2.62, -0.03, -2.62, 0.03, 0.0026),
-      hairline(2.62, -0.03, 2.62, 0.03, 0.0026),
-      hairline(0, 2.02, 0, 2.08, 0.0026),
-      hairline(0, -2.02, 0, -2.08, 0.0026),
-    )
-    // Calibration: fine inner arcs with index marks, between the O and the mech ring.
-    const innerGeos: THREE.BufferGeometry[] = []
-    for (let i = 0; i < 4; i++) {
-      const a0 = (i / 4) * Math.PI * 2 + Math.PI / 4 - 0.35
-      innerGeos.push(arcBand(1.47, 0.0022, a0, a0 + 0.7, 64))
-      for (let k = 0; k <= 7; k++) {
-        const a = a0 + (k / 7) * 0.7
-        const r1 = k % 7 === 0 ? 1.415 : 1.437
-        innerGeos.push(hairline(Math.cos(a) * 1.45, Math.sin(a) * 1.45, Math.cos(a) * r1, Math.sin(a) * r1, 0.0022))
+    // ------------------------------------------------------------- Voice waveform ring
+    const waveGeo = (width: number) => {
+      const g = new THREE.BufferGeometry()
+      g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array((WAVE_POINTS + 1) * 2 * 3), 3))
+      const s: number[] = []
+      const side: number[] = []
+      const idx: number[] = []
+      for (let i = 0; i <= WAVE_POINTS; i++) {
+        s.push(i / WAVE_POINTS, i / WAVE_POINTS)
+        side.push(1, -1)
+        if (i < WAVE_POINTS) idx.push(i * 2, i * 2 + 1, i * 2 + 2, i * 2 + 1, i * 2 + 3, i * 2 + 2)
       }
+      g.setAttribute('aS', new THREE.Float32BufferAttribute(s, 1))
+      g.setAttribute('aSide', new THREE.Float32BufferAttribute(side, 1))
+      g.setIndex(idx)
+      g.userData.width = width
+      return g
     }
-    const dial = tag(new THREE.Mesh(merge(dialGeos), this.dialMat), 'hide')
-    dial.name = 'DialRings'
-    const dialInner = tag(new THREE.Mesh(merge(innerGeos), this.dialInnerMat), 'hide')
-    dialInner.name = 'CalibrationMarks'
+    const ribbonMat = (intensity: number) => additive(H.ribbon, { uColor: { value: ice() }, uIntensity: { value: intensity }, uReveal: { value: 1 }, uPulse: { value: 0 }, uPulsePos: { value: 0 }, uTime: { value: 0 } })
+    this.wave = tag(new THREE.Mesh(waveGeo(0.007), ribbonMat(0)), 'bloom')
+    this.waveGlow = tag(new THREE.Mesh(waveGeo(0.05), ribbonMat(0)), 'bloom')
+    this.wave.name = 'VoiceWaveform'
+    this.wave.frustumCulled = false
+    this.waveGlow.frustumCulled = false
+    this.wave.position.z = 0.05
+    this.waveGlow.position.z = 0.049
+    this.coreGroup.add(this.waveGlow, this.wave)
 
-    // External targeting ring: four arcs with brackets, plus a local alert sector.
-    this.target.name = 'TargetingRing05'
-    const targetGeos: THREE.BufferGeometry[] = []
-    for (let i = 0; i < 4; i++) {
-      const c = Math.PI / 4 + (i * Math.PI) / 2
-      const a0 = c - 0.42
-      const a1 = c + 0.42
-      targetGeos.push(arcBand(RINGS.target, 0.003, a0, a1, 160))
-      for (const a of [a0, a1]) targetGeos.push(hairline(Math.cos(a) * (RINGS.target - 0.04), Math.sin(a) * (RINGS.target - 0.04), Math.cos(a) * (RINGS.target + 0.01), Math.sin(a) * (RINGS.target + 0.01), 0.003))
+    // ------------------------------------------------------------- Ring families
+    for (const spec of RING_SPECS) {
+      const mat = additive(H.ring, ringUniforms(spec.mode, 0))
+      mat.uniforms.uCount!.value = spec.count ?? 1
+      mat.uniforms.uDuty!.value = spec.duty ?? 1
+      mat.uniforms.uMajor!.value = spec.major ?? 1
+      mat.uniforms.uHlWidth!.value = spec.hl?.width ?? 0.05
+      mat.uniforms.uCore!.value = spec.core ?? 0
+      const mesh = tag(new THREE.Mesh(annulus(spec.r, spec.width, spec.mode === 0 ? 720 : 1024), mat), 'bloom')
+      mesh.name = spec.name
+      mesh.position.z = spec.z
+      mesh.rotation.z = Math.random() * Math.PI * 2
+      this.rings.push({ spec, mesh, mat, hl: Math.random() })
+      this.ringGroup.add(mesh)
     }
-    this.target.add(tag(new THREE.Mesh(merge(targetGeos), this.targetMat), 'hide'))
-    this.alertMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })
-    const alert = tag(new THREE.Mesh(arcBand(RINGS.target, 0.012, Math.PI / 2 - 0.2, Math.PI / 2 + 0.2, 64), this.alertMat), 'bloom')
-    alert.name = 'AlertSector'
-    this.scanMarker = tag(new THREE.Mesh(new THREE.CircleGeometry(0.022, 3), hudBasic()), 'hide')
-    this.scanMarker.name = 'ScanMarker'
+    // Orbiting triangle markers on the segment ring.
+    this.markers = new THREE.Group()
+    this.markerMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending })
+    const tri = new THREE.CircleGeometry(0.026, 3)
+    for (let i = 0; i < 3; i++) {
+      const m = tag(new THREE.Mesh(tri, this.markerMat), 'bloom')
+      const a = (i / 3) * Math.PI * 2
+      m.position.set(Math.cos(a) * 1.7, Math.sin(a) * 1.7, 0)
+      m.rotation.z = a + Math.PI
+      this.markers.add(m)
+    }
+    this.markers.position.z = 0.18
+    this.ringGroup.add(this.markers)
+    // Radar sweep.
+    this.sweepMat = additive(H.sweep, { uSize: { value: 4 }, uAngle: { value: 0 }, uIntensity: { value: 0 }, uR0: { value: 1.12 }, uR1: { value: 1.76 }, uColor: { value: ice() } })
+    const sweep = tag(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.sweepMat), 'bloom')
+    sweep.name = 'RadarSweep'
+    sweep.frustumCulled = false
+    sweep.position.z = 0.12
+    this.ringGroup.add(sweep)
 
-    // Data segments bound to real telemetry.
+    // ------------------------------------------------------------- A / P drawn as light
+    const { a, p } = markPolylines()
+    this.frameEdgeMat = ribbonMat(0)
+    this.frameGlowMat = ribbonMat(0)
+    this.frameFillMat = additive(H.holoFill, { uColor: { value: ice() }, uIntensity: { value: 0 }, uTime: { value: 0 }, uScanPos: { value: 0 } })
+    const shape = (pts: V2[]) => new THREE.Shape(pts.map(([x, y]) => new THREE.Vector2(x, y)))
+    for (const [pts, closed] of [
+      [a, false],
+      [p, true],
+    ] as const) {
+      const fill = tag(new THREE.Mesh(new THREE.ShapeGeometry(shape(pts)), this.frameFillMat), 'hide')
+      const glow = tag(new THREE.Mesh(polylineRibbon(pts, 0.06, closed), this.frameGlowMat), 'bloom')
+      const edge = tag(new THREE.Mesh(polylineRibbon(pts, 0.013, closed), this.frameEdgeMat), 'bloom')
+      glow.position.z = 0.001
+      edge.position.z = 0.002
+      this.frameGroup.add(fill, glow, edge)
+    }
+    this.frameGroup.name = 'AOPFrames'
+    this.frameGroup.position.z = -0.1
+
+    // ------------------------------------------------------------- HUD: readouts bound to real telemetry
+    this.hud.position.z = 0.3
     const gaugeMat = (start: number, length: number) =>
       new THREE.ShaderMaterial({
         vertexShader: S.gauge.vertex,
         fragmentShader: S.gauge.fragment,
-        uniforms: { uColor: { value: new THREE.Color(0.7, 0.86, 1) }, uAlpha: { value: 0 }, uFill: { value: 0 }, uStart: { value: start }, uLength: { value: length } },
+        uniforms: { uColor: { value: ice() }, uAlpha: { value: 0 }, uFill: { value: 0 }, uStart: { value: start }, uLength: { value: length } },
         transparent: true,
         depthWrite: false,
+        depthTest: false,
         blending: THREE.AdditiveBlending,
       })
     const cpuStart = (200 * Math.PI) / 180
@@ -423,93 +381,59 @@ export class AOPOrbScene {
     const gLen = (50 * Math.PI) / 180
     this.cpuGauge = gaugeMat(cpuStart, gLen)
     this.memGauge = gaugeMat(memStart, gLen)
-    const cpuArc = tag(new THREE.Mesh(arcBand(1.8, 0.016, cpuStart, cpuStart + gLen, 96), this.cpuGauge), 'hide')
-    const memArc = tag(new THREE.Mesh(arcBand(1.8, 0.016, memStart, memStart + gLen, 96), this.memGauge), 'hide')
-    cpuArc.name = 'DataSegments'
-
+    this.hud.add(tag(new THREE.Mesh(arcBand(1.88, 0.02, cpuStart, cpuStart + gLen, 96), this.cpuGauge), 'bloom'), tag(new THREE.Mesh(arcBand(1.88, 0.02, memStart, memStart + gLen, 96), this.memGauge), 'bloom'))
     const deg: HudLabel[] = []
     for (let i = 0; i < 12; i++) {
-      const a = (i / 12) * Math.PI * 2
-      const l = new HudLabel(String(i * 30).padStart(3, '0'), 0.05)
-      l.mesh.position.set(Math.cos(a) * 1.94, Math.sin(a) * 1.94, 0)
+      const ang = (i / 12) * Math.PI * 2
+      const l = new HudLabel(String(i * 30).padStart(3, '0'), 0.048)
+      l.mesh.position.set(Math.cos(ang) * 2.1, Math.sin(ang) * 2.1, 0)
       deg.push(l)
     }
-    const title = new HudLabel('AOP · OPTICAL CORE', 0.058)
-    title.mesh.position.set(0, 2.36, 0)
-    const state = new HudLabel('STATE  —', 0.06)
-    state.mesh.position.set(0, 2.25, 0)
+    const title = new HudLabel('AOP · J.A.R.V.I.S', 0.06)
+    title.mesh.position.set(0, 2.3, 0)
+    const state = new HudLabel('STATE —', 0.06)
+    state.mesh.position.set(0, 2.19, 0)
     const cpu = new HudLabel('CPU —', 0.058, 'right')
-    cpu.mesh.position.set(Math.cos(cpuStart + gLen / 2) * 2.0 - 0.04, Math.sin(cpuStart + gLen / 2) * 2.0, 0)
+    cpu.mesh.position.set(Math.cos(cpuStart + gLen / 2) * 2.06 - 0.04, Math.sin(cpuStart + gLen / 2) * 2.06, 0)
     const mem = new HudLabel('MEM —', 0.058, 'left')
-    mem.mesh.position.set(Math.cos(memStart + gLen / 2) * 2.0 + 0.04, Math.sin(memStart + gLen / 2) * 2.0, 0)
+    mem.mesh.position.set(Math.cos(memStart + gLen / 2) * 2.06 + 0.04, Math.sin(memStart + gLen / 2) * 2.06, 0)
     const agents = new HudLabel('AGENTS 0/6', 0.052)
-    agents.mesh.position.set(0, -2.2, 0)
-    const calib = [new HudLabel('R 1.000', 0.04, 'left'), new HudLabel('R 1.290', 0.04, 'left')]
-    calib[0]!.mesh.position.set(1.06, 0.3, 0)
-    calib[1]!.mesh.position.set(1.4, 0.62, 0)
-    this.labels = { deg, title, state, cpu, mem, agents, calib }
-    this.hud.add(this.ticks, dial, dialInner, this.target, alert, this.scanMarker, cpuArc, memArc, ...[...deg, title, state, cpu, mem, agents, ...calib].map((l) => l.mesh))
+    agents.mesh.position.set(0, -2.3, 0)
+    this.labels = { deg, title, state, cpu, mem, agents }
+    this.hud.add(...[...deg, title, state, cpu, mem, agents].map((l) => l.mesh))
 
-    // ---------------------------------------------------------------- EnergyAssembly
-    this.glare = additive(S.glow, { uSize: { value: 0.8 }, uColor: { value: new THREE.Color(0.75, 0.88, 1) }, uIntensity: { value: 0 }, uFalloff: { value: 14 }, uRing: { value: 0 } })
-    const glare = tag(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.glare), 'hide')
-    glare.position.z = 0.16
-    glare.frustumCulled = false
-    glare.name = 'CoreGlow'
-    this.halo = additive(S.glow, { uSize: { value: 4.6 }, uColor: { value: new THREE.Color(0.55, 0.75, 1) }, uIntensity: { value: 0 }, uFalloff: { value: 2.6 }, uRing: { value: 0 } })
-    const halo = tag(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.halo), 'hide')
-    halo.position.z = -1.0
-    halo.frustumCulled = false
-    halo.name = 'Halo'
-    this.sweepMat = new THREE.ShaderMaterial({
-      vertexShader: /* glsl */ `varying vec2 vP; void main(){ vP = position.xy; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
-      fragmentShader: /* glsl */ `precision highp float; uniform float uPos; uniform float uAmt; varying vec2 vP;
-        void main(){ float r = length(vP); float d = dot(vP, normalize(vec2(0.8, 0.6))) - uPos;
-          float band = exp(-d * d * 260.0) * 0.8 + exp(-d * d * 30.0) * 0.12;
-          gl_FragColor = vec4(vec3(0.8, 0.9, 1.0) * band * uAmt * smoothstep(0.66, 0.6, r), 1.0); }`,
-      uniforms: { uPos: { value: -2 }, uAmt: { value: 0 } },
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    })
-    const sweep = tag(new THREE.Mesh(new THREE.CircleGeometry(0.66, 64), this.sweepMat), 'hide')
-    sweep.position.z = 0.13
-    sweep.name = 'LightSweep'
-    this.energy.add(glare, halo, sweep)
+    // ------------------------------------------------------------- Particles
+    this.buildSparks(preset)
 
-    // ---------------------------------------------------------------- ParticleAssembly
-    this.buildParticles(preset)
-
-    // ---------------------------------------------------------------- AgentOrbitAssembly
+    // ------------------------------------------------------------- Agent nodes
     const linkPos: number[] = []
     const linkS: number[] = []
     const linkSlot: number[] = []
     const linkIdx: number[] = []
     SLOT_IDS.forEach((id, i) => {
-      const a = AGENT_SLOTS[id]
-      const bead = new THREE.Mesh(new THREE.SphereGeometry(0.024, 24, 16), m.chrome)
-      bead.position.set(Math.cos(a) * ORBIT_RADIUS, Math.sin(a) * ORBIT_RADIUS, 0)
-      bead.visible = false
-      this.nodeBeads.push(bead)
-      const gm = additive(S.glow, { uSize: { value: 0.22 }, uColor: { value: new THREE.Color(0.75, 0.88, 1) }, uIntensity: { value: 0 }, uFalloff: { value: 22 }, uRing: { value: 0 } })
+      const ang = AGENT_SLOTS[id]
+      const x = Math.cos(ang) * ORBIT_RADIUS
+      const y = Math.sin(ang) * ORBIT_RADIUS
+      const gm = additive(S.glow, { uSize: { value: 0.32 }, uColor: { value: ice() }, uIntensity: { value: 0 }, uFalloff: { value: 18 }, uRing: { value: 0 } })
       const g = tag(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), gm), 'bloom')
-      g.position.copy(bead.position)
-      g.position.z += 0.03
+      g.position.set(x, y, 0.03)
       g.frustumCulled = false
       this.nodeGlows.push(gm)
-      this.agentGroup.add(bead, g)
-      // Link ribbon from just outside the O rim to the node.
-      const r0 = 1.06
-      const r1 = ORBIT_RADIUS - 0.05
-      const nx = -Math.sin(a) * 0.0018
-      const ny = Math.cos(a) * 0.0018
+      const hex = tag(new THREE.Mesh(new THREE.RingGeometry(0.045, 0.054, 6), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending })), 'bloom')
+      hex.position.set(x, y, 0.035)
+      this.nodeRings.push(hex)
+      this.agentGroup.add(g, hex)
+      const r0 = 1.1
+      const r1 = ORBIT_RADIUS - 0.07
+      const nx = -Math.sin(ang) * 0.002
+      const ny = Math.cos(ang) * 0.002
       const k = linkPos.length / 3
-      for (const [r, s] of [
+      for (const [r, sv] of [
         [r0, 0],
         [r1, 1],
       ] as const) {
-        linkPos.push(Math.cos(a) * r + nx, Math.sin(a) * r + ny, 0, Math.cos(a) * r - nx, Math.sin(a) * r - ny, 0)
-        linkS.push(s, s)
+        linkPos.push(Math.cos(ang) * r + nx, Math.sin(ang) * r + ny, 0, Math.cos(ang) * r - nx, Math.sin(ang) * r - ny, 0)
+        linkS.push(sv, sv)
         linkSlot.push(i, i)
       }
       linkIdx.push(k, k + 1, k + 2, k + 1, k + 3, k + 2)
@@ -519,284 +443,264 @@ export class AOPOrbScene {
     lg.setAttribute('aS', new THREE.Float32BufferAttribute(linkS, 1))
     lg.setAttribute('aSlot', new THREE.Float32BufferAttribute(linkSlot, 1))
     lg.setIndex(linkIdx)
-    this.linkMat = additive(S.link, { uColor: { value: new THREE.Color(0.7, 0.86, 1) }, uTime: { value: 0 }, uIntensity: { value: new Array(6).fill(0) }, uRunning: { value: new Array(6).fill(0) } })
-    const links = tag(new THREE.Mesh(lg, this.linkMat), 'bloom')
-    links.name = 'AgentLinks'
-    this.agentGroup.add(links)
+    this.linkMat = additive(S.link, { uColor: { value: ice() }, uTime: { value: 0 }, uIntensity: { value: new Array(6).fill(0) }, uRunning: { value: new Array(6).fill(0) } })
+    this.agentGroup.add(tag(new THREE.Mesh(lg, this.linkMat), 'bloom'))
     this.agentGroup.position.z = 0.02
-
-    // ---------------------------------------------------------------- Debug overlays (off by default)
     this.debugGroup.visible = false
-    const ids: [string, number, number][] = [
-      ['NUCLEUS z-0.62', 0.05, -0.62],
-      ['IRIS z-0.42', 0.45, -0.42],
-      ['L1 GLASS', 0.4, 0.06],
-      ['R01 GLASS', RINGS.glass, 0.09],
-      ['R04 ENERGY', RINGS.energy, 0.05],
-      ['R02 MECH', RINGS.mech, 0],
-      ['R03 HUD', RINGS.hud, 0.24],
-      ['R05 TARGET', RINGS.target, 0.24],
-    ]
-    ids.forEach(([text, r, z], i) => {
-      const l = new HudLabel(text, 0.05, 'left')
-      const a = 0.35 + i * 0.13
-      l.mesh.position.set(Math.cos(a) * r, Math.sin(a) * r, z + 0.01)
-      l.setColor(new THREE.Color(1, 0.75, 0.4), 1)
-      this.ringIdLabels.push(l)
-      this.debugGroup.add(l.mesh)
-    })
   }
 
-  private buildParticles(preset: QualityPreset): void {
-    for (const l of this.particleLayers) {
-      this.particleGroup.remove(l.points, l.bounds)
+  private buildSparks(preset: QualityPreset): void {
+    for (const l of this.sparks) {
+      this.particleGroup.remove(l.points)
       l.points.geometry.dispose()
       l.mat.dispose()
     }
-    this.particleLayers = []
-    const layer = (n: number, rMin: number, rMax: number, z0: number, z1: number, size: number, soft: number, speed: number) => {
+    this.sparks = []
+    const layer = (n: number, rMin: number, rMax: number, z0: number, z1: number, size: number, speed: number, far: boolean) => {
       if (n <= 0) return
-      const seed = new Float32Array(n)
-      const radius = new Float32Array(n)
-      const angle = new Float32Array(n)
-      const spd = new Float32Array(n)
-      const z = new Float32Array(n)
+      const attrs = { aSeed: new Float32Array(n), aRadius: new Float32Array(n), aAngle: new Float32Array(n), aSpeed: new Float32Array(n), aZ: new Float32Array(n) }
       for (let i = 0; i < n; i++) {
-        seed[i] = (i + Math.random()) / n
-        radius[i] = Math.random()
-        angle[i] = Math.random() * Math.PI * 2
-        spd[i] = (0.2 + Math.random() * 0.8) * speed * (Math.random() < 0.5 ? -1 : 1)
-        z[i] = z0 + Math.random() * (z1 - z0)
+        attrs.aSeed[i] = (i + Math.random()) / n
+        attrs.aRadius[i] = rMin + Math.pow(Math.random(), 1.4) * (rMax - rMin)
+        attrs.aAngle[i] = Math.random() * Math.PI * 2
+        attrs.aSpeed[i] = (0.3 + Math.random() * 0.7) * speed * (Math.random() < 0.65 ? 1 : -1)
+        attrs.aZ[i] = z0 + Math.random() * (z1 - z0)
       }
       const g = new THREE.BufferGeometry()
       g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n * 3), 3))
-      g.setAttribute('aSeed', new THREE.Float32BufferAttribute(seed, 1))
-      g.setAttribute('aRadius', new THREE.Float32BufferAttribute(radius, 1))
-      g.setAttribute('aAngle', new THREE.Float32BufferAttribute(angle, 1))
-      g.setAttribute('aSpeed', new THREE.Float32BufferAttribute(spd, 1))
-      g.setAttribute('aZ', new THREE.Float32BufferAttribute(z, 1))
-      const mat = additive(S.particles, {
+      for (const [k, arr] of Object.entries(attrs)) g.setAttribute(k, new THREE.Float32BufferAttribute(arr, 1))
+      const mat = additive(H.sparks, {
         uTime: { value: 0 },
-        uPhase: { value: 0 },
-        uRMin: { value: rMin },
-        uRMax: { value: rMax },
-        uFlowAmt: { value: 0 },
+        uBurst: { value: 0 },
+        uPull: { value: 0 },
         uSize: { value: size },
         uPixelRatio: { value: 1 },
         uViewH: { value: 800 },
         uDensity: { value: 0 },
-        uColor: { value: new THREE.Color(0.75, 0.88, 1) },
+        uColor: { value: new THREE.Color(0.7, 0.88, 1) },
         uAlpha: { value: 0 },
-        uSoft: { value: soft },
       })
       const points = tag(new THREE.Points(g, mat), 'hide')
       points.frustumCulled = false
-      const bounds = new THREE.Box3Helper(new THREE.Box3(new THREE.Vector3(-rMax, -rMax, z0), new THREE.Vector3(rMax, rMax, z1)), 0xffaa55)
-      bounds.visible = false
-      tag(bounds, 'hide')
-      this.particleGroup.add(points, bounds)
-      this.particleLayers.push({ points, mat, rMin, rMax, phase: 0, bounds })
+      this.particleGroup.add(points)
+      this.sparks.push({ points, mat, far })
     }
-    layer(preset.particles.far, 1.2, 4.2, -4, -1.6, 2.6, 0, 0.012) // far: tiny, slow
-    layer(preset.particles.mid, 1.06, 2.35, -0.25, 0.25, 3.4, 0, 0.03) // mid: in the optical band, flow-reactive
-    layer(preset.particles.near, 1.6, 3.2, 1.0, 1.9, 34, 1, 0.006) // near: rare, defocused
+    const { far, mid, near } = preset.particles
+    layer(mid * 3 + near * 20, 1.04, 2.4, -0.2, 0.3, 3.2, 0.12, false)
+    layer(far * 3, 2.2, 5, -3, -1, 2.4, 0.02, true)
   }
 
-  setQuality(preset: QualityPreset, glass: boolean): void {
-    this.buildParticles(preset)
-    this.setGlass(preset.transmission && glass)
+  setQuality(preset: QualityPreset, _glass: boolean): void {
+    this.buildSparks(preset)
   }
 
-  setGlass(physical: boolean): void {
-    for (const g of this.glassMeshes) g.material = physical ? this.mats.glass : this.mats.glassLite
-  }
+  /** The holographic Orb has no physical glass; kept for the renderer's adaptive-quality contract. */
+  setGlass(_physical: boolean): void {}
 
   setDebug(d: DebugFlags): void {
-    this.debugGroup.visible = d.ringIds
-    for (const l of this.particleLayers) {
-      l.bounds.visible = d.bounds
-      l.points.visible = d.particles
-    }
+    for (const l of this.sparks) l.points.visible = d.particles
   }
 
-  /** Assembly offsets for the exploded "show depth layers" view. */
+  /** Exploded depth view (developer toggle) and per-state depth expansion. */
   explode(amount: number, depth: number): void {
-    const z = (g: THREE.Group, base: number, off: number) => {
+    const z = (g: THREE.Object3D, base: number, off: number) => {
       g.position.z = base * depth + off * amount
-      g.scale.z = depth * (1 + amount * 1.6)
     }
-    z(this.core, 0, -0.9)
-    z(this.optical, 0, 0)
-    z(this.mechanical, 0, -0.45)
-    z(this.hud, 0.24, 0.9)
-    z(this.energy, 0, 0.45)
-    z(this.agentGroup, 0.02, 0.5)
+    z(this.coreGroup, 0, -0.6)
+    z(this.frameGroup, -0.1, -1.0)
+    z(this.ringGroup, 0, 0.4)
+    z(this.hud, 0.3, 1.0)
+    z(this.agentGroup, 0.02, 0.6)
+    this.ringGroup.scale.z = depth * (1 + amount * 3)
   }
 
   update(f: SceneFrame): void {
     const { v, boot, out, mic } = f
     const tint = new THREE.Color(v.tint[0], v.tint[1], v.tint[2])
-    const hudColor = tint.clone().lerp(new THREE.Color(1, 1, 1), 0.2)
-    const act = (r: number) => clamp01((1 + boot.outer * 1.55 - r) / 0.25)
+    const white = new THREE.Color(1, 1, 1)
+    const hudColor = tint.clone().lerp(white, 0.08)
+    const energy = v.energy
+    const userTalking = mic.level > out.level + 0.02
 
-    // Structure visibility: reflections come up per assembly during boot.
-    const metal = v.metal
-    this.mats.housing.envMapIntensity = metal * (0.12 + 0.88 * boot.core)
-    this.mats.plate.envMapIntensity = metal * boot.mark
-    this.mats.edge.envMapIntensity = metal * boot.mark * 1.1
-    this.mats.ring.envMapIntensity = metal * act(RINGS.mech)
-    this.mats.interior.envMapIntensity = metal * boot.inner * 0.4
-    this.mats.chrome.envMapIntensity = metal * act(RINGS.chrome)
-    this.mats.glass.envMapIntensity = 1.1 * metal * boot.core
-    this.mats.glassLite.envMapIntensity = 1.2 * metal * boot.core
-
-    // Nucleus: low band breathes, onset ignites. Output-driven only (never fabricated).
-    const nucleus = v.nucleus * boot.core * v.energy
-    const nu = this.nucleusMat.uniforms
-    nu.uTime!.value = f.time
-    nu.uIntensity!.value = nucleus * (1 + out.level * 0.35)
-    nu.uLow!.value = out.low * 0.9
-    nu.uIgnite!.value = f.ignite + boot.flare
-    nu.uPoint!.value = boot.point
-    nu.uSize!.value = 0.95 * v.nucleusSize
-    ;(nu.uColor!.value as THREE.Color).copy(tint).lerp(new THREE.Color(0.6, 0.8, 1), 0.4)
-    this.nucleusLight.intensity = (nucleus * (1 + out.low * 0.8) + f.ignite * 0.8 + boot.flare) * 1.1
-    this.bounceLight.intensity = (nucleus * (1 + out.mid * 0.5) + f.ignite * 0.4) * 0.4
-    this.bounceLight.color.copy(tint)
-    this.keyLight.intensity = 2.0 * metal * boot.mark
-    this.rimLight.intensity = 1.4 * metal * boot.core
-    this.nucleusLight.color.copy(tint)
-
-    // Iris: tightens while thinking, closed during cold boot until the inner stage.
-    const open = v.aperture * boot.inner
-    const phi = 0.08 + open * 1.0
-    this.blades.forEach((b) => (b.rotation.z = phi))
-
-    this.innerMech.rotation.z -= f.dt * v.innerSpeed
-    this.mechRing.rotation.z += f.dt * v.segSpeed
-    this.target.rotation.z += f.dt * v.targetSpeed
-
-    // Inner lens rim ← mid band; fine radial ticks ← high band.
-    const lr = this.lensRim.uniforms
-    lr.uTime!.value = f.time
-    lr.uBase!.value = v.lens * 0.55 * boot.inner * v.energy
-    lr.uLevel!.value = out.mid * 1.4
-    lr.uHigh!.value = out.high * 0.8
-    lr.uPhase!.value = this.energyPhase * 0.5
-    ;(lr.uColor!.value as THREE.Color).copy(tint)
-    this.fineTickMat.color.copy(tint).multiplyScalar((0.05 + out.high * 2.2) * v.lens * boot.inner)
-    for (let i = 0; i < 72; i++) {
-      const a = (i / 72) * Math.PI * 2
-      const len = 0.018 + (i % 6 === 0 ? 0.012 : 0) + out.high * 0.03 * (0.6 + 0.4 * Math.sin(i * 1.7 + f.time * 9))
-      this.tmpM.compose(this.tmpV.set(Math.cos(a) * (0.61 - len / 2), Math.sin(a) * (0.61 - len / 2), 0), this.tmpQ.setFromAxisAngle(new THREE.Vector3(0, 0, 1), a), this.tmpS.set(len, 0.0024, 1))
-      this.fineTicks.setMatrixAt(i, this.tmpM)
+    // ---- Speech envelope: fast attack, short release → every syllable flashes the core.
+    const target = Math.min(1, out.level * 1.3 + out.low * 0.4)
+    this.flash += (target - this.flash) * (target > this.flash ? 1 - Math.exp(-f.dt / 0.018) : 1 - Math.exp(-f.dt / 0.11))
+    this.shockCooldown -= f.dt
+    if (out.level - this.prevOut > 0.1 && out.level > 0.18 && this.shockCooldown <= 0) {
+      this.emitShock(0.7 + out.level * 0.6)
+      this.shockCooldown = 0.22
     }
-    this.fineTicks.instanceMatrix.needsUpdate = true
-    for (const g of this.ghosts) g.uniforms.uIntensity!.value = (g.userData.base as number) * (0.4 + v.lens) * boot.core
+    this.prevOut = out.level
+    if (boot.flare > 0.5 && !this.bootFlareFired) {
+      this.emitShock(1.4)
+      this.bootFlareFired = true
+    }
+    if (boot.flare === 0 && boot.core === 1) this.bootFlareFired = false
 
-    // Energy transport ring: user speech flows inward (cyan), JARVIS speech flows outward (white-blue).
-    const userTalking = mic.level > out.level
-    const flowDir = userTalking ? -1 : out.level > 0.02 ? 1 : Math.sign(v.flow)
-    this.energyPhase += f.dt * flowDir * (0.25 + Math.max(mic.level, out.level) * 1.6)
-    const er = this.energyRing.uniforms
-    er.uTime!.value = f.time
-    er.uPhase!.value = this.energyPhase
-    er.uBase!.value = (0.18 + v.ring * 0.8) * act(RINGS.energy) * v.energy
-    er.uLevel!.value = (userTalking ? mic.level : out.level) * 1.3 + f.ignite * 0.6
-    er.uHigh!.value = 0
-    er.uReveal!.value = clamp01(boot.outer * 1.6)
-    ;(er.uColor!.value as THREE.Color).copy(userTalking ? new THREE.Color(0.5, 0.85, 1) : tint)
+    // ---- Core
+    const cu = this.coreMat.uniforms
+    cu.uTime!.value = f.time
+    cu.uIntensity!.value = v.nucleus * energy * boot.core
+    cu.uFlash!.value = this.flash
+    cu.uIgnite!.value = f.ignite + boot.flare * 1.5
+    cu.uPoint!.value = boot.point
+    cu.uSwirl!.value = 0.25 + v.scan * 0.9
+    cu.uLow!.value = out.low
+    ;(cu.uColor!.value as THREE.Color).copy(tint)
+    const om = this.oRingMat.uniforms
+    om.uTime!.value = f.time
+    om.uIntensity!.value = 0.018 * energy * boot.core * v.ring
+    ;(om.uColor!.value as THREE.Color).copy(tint)
+    const orim = this.oRingOuterMat.uniforms
+    orim.uIntensity!.value = (0.55 + this.flash * 1.0 + f.ignite * 0.8) * energy * boot.core * v.ring
+    orim.uCore!.value = 1.5
+    orim.uReveal!.value = clamp01(boot.core * 1.2)
+    ;(orim.uColor!.value as THREE.Color).copy(tint).lerp(white, 0.3)
 
-    this.shellMat.uniforms.uIntensity!.value = 0.22 * metal * boot.core
-    this.glare.uniforms.uIntensity!.value = nucleus * 0.05 * (1 + out.level * 0.4) + f.ignite * 0.15
-    this.halo.uniforms.uIntensity!.value = nucleus * 0.035
-    // Light sweep across the front glass: on ignition and boot flare, plus a slow idle pass.
-    const idleSweep = (f.time % 14) / 14
-    this.sweepMat.uniforms.uPos!.value = -0.9 + idleSweep * 4.5
-    this.sweepMat.uniforms.uAmt!.value = (0.06 + f.ignite * 0.4 + boot.flare * 0.6) * boot.core * metal
+    // ---- Shockwaves
+    for (const s of this.shocks) {
+      s.age = Math.min(1, s.age + f.dt / 1.1)
+      const e = 1 - s.age
+      const u = s.mesh.material.uniforms
+      u.uRadius!.value = 1.02 + Math.pow(s.age, 0.7) * 1.25
+      u.uAlpha!.value = e * e * s.strength * energy * 0.5
+      u.uWidth!.value = 0.008 + s.age * 0.02
+      ;(u.uColor!.value as THREE.Color).copy(tint).lerp(white, 0.4)
+    }
 
-    // A → O → P light path.
+    // ---- Voice waveform: JARVIS bands push out (white), user bands (cyan) when listening.
+    this.updateWave(f, userTalking)
+
+    // ---- Rings: angular reveal sweeps outward during boot; spin and brightness per state.
+    for (const r of this.rings) {
+      const act = clamp01((1 + boot.outer * 1.25 - r.spec.r) / 0.18)
+      const u = r.mat.uniforms
+      r.mesh.rotation.z += f.dt * r.spec.speed * v.spin
+      if (r.spec.hl) r.hl = (r.hl + f.dt * r.spec.hl.speed * (0.6 + v.spin * 0.6)) % 1
+      u.uHl!.value = r.hl
+      u.uHlGain!.value = r.spec.hl ? r.spec.hl.gain * (1 + this.flash) : 0
+      u.uReveal!.value = act
+      u.uTime!.value = f.time
+      u.uFlicker!.value = v.alert * 0.6
+      const voiceLift = r.spec.name === 'EnergyRing' ? this.flash * 1.0 + mic.level * 1.2 : r.spec.name === 'TickRing' ? mic.level * 1.2 : 0
+      u.uIntensity!.value = r.spec.gain * 0.5 * (v.ring + voiceLift) * energy * Math.min(1, act * 3)
+      const c = u.uColor!.value as THREE.Color
+      c.copy(userTalking && (r.spec.name === 'EnergyRing' || r.spec.name === 'TickRing') ? new THREE.Color(0.45, 0.86, 1) : hudColor)
+      if (r.spec.name === 'BracketRing' && v.alert > 0.01) c.lerp(new THREE.Color(v.alertColor[0], v.alertColor[1], v.alertColor[2]), v.alert)
+    }
+    this.markers.rotation.z += f.dt * 0.45 * v.spin
+    this.markerMat.color.copy(hudColor).multiplyScalar(1.6 * v.ring * energy * clamp01((boot.outer - 0.6) * 3))
+    const sw = this.sweepMat.uniforms
+    sw.uAngle!.value = -f.scanAngle
+    sw.uIntensity!.value = (0.03 + v.scan * 0.22) * energy * boot.hud
+    ;(sw.uColor!.value as THREE.Color).copy(tint)
+
+    // ---- A / P light frames: edges draw on during boot; pulses run when agents are working.
     const anyRunning = f.agents.some((a) => a.status === 'running')
-    this.stripPulse = (this.stripPulse + f.dt * (anyRunning ? 0.55 : 0.18)) % 1.3
-    const su = this.stripMat.uniforms
-    su.uBase!.value = (0.12 + v.ring * 0.35) * v.energy * boot.mark
-    su.uReveal!.value = boot.mark
-    su.uPulse!.value = (anyRunning ? 1 : 0.25 * v.ring) + f.ignite
-    su.uPulsePos!.value = this.stripPulse
-    ;(su.uColor!.value as THREE.Color).copy(tint)
-    this.marks.position.z = -0.04 - (1 - boot.mark) * 0.55
-
-    // Segment inserts light up sequentially as the mech ring activates.
-    const mechAct = act(RINGS.mech)
-    for (let i = 0; i < 12; i++) {
-      const lit = clamp01(mechAct * 12 - i) * (0.35 + v.ring * 2.2) * v.energy
-      this.inserts.setColorAt(i, this.insertColor.copy(tint).multiplyScalar(lit))
+    this.framePulse = (this.framePulse + f.dt * (anyRunning ? 0.5 : 0.16)) % 1
+    for (const [m, k] of [
+      [this.frameEdgeMat, 0.9],
+      [this.frameGlowMat, 0.12],
+    ] as const) {
+      const u = m.uniforms
+      u.uIntensity!.value = k * v.frame * energy
+      u.uReveal!.value = boot.mark
+      u.uPulse!.value = anyRunning ? 1.6 : 0.6
+      u.uPulsePos!.value = this.framePulse
+      u.uTime!.value = f.time
+      ;(u.uColor!.value as THREE.Color).copy(tint)
     }
-    this.inserts.instanceColor!.needsUpdate = true
+    const fu = this.frameFillMat.uniforms
+    fu.uIntensity!.value = 0.12 * v.frame * energy * boot.mark
+    fu.uTime!.value = f.time
+    fu.uScanPos!.value = 1.3 - ((f.time * 0.35) % 2.6)
+    ;(fu.uColor!.value as THREE.Color).copy(tint)
+    this.frameGroup.position.z = -0.1 - (1 - boot.mark) * 0.6
 
-    // HUD: precision instrumentation. Mic bands lengthen the outer ticks (user → outer ring).
-    const hudA = v.hud * boot.hud * v.energy
-    this.tickMat.color.copy(hudColor).multiplyScalar(hudA * act(RINGS.hud) * (0.75 + mic.level * 0.8))
-    for (let i = 0; i < 180; i++) {
-      const a = (i / 180) * Math.PI * 2
-      const band = mic.bands[Math.floor(Math.abs(Math.sin(a * 0.5)) * 7.99)] ?? 0
-      const major = i % 15 === 0
-      const len = (major ? 0.07 : i % 5 === 0 ? 0.04 : 0.024) + band * mic.level * 0.2
-      const r = RINGS.hud + len / 2
-      this.tmpM.compose(this.tmpV.set(Math.cos(a) * r, Math.sin(a) * r, 0), this.tmpQ.setFromAxisAngle(new THREE.Vector3(0, 0, 1), a), this.tmpS.set(len, major ? 0.0042 : 0.0028, 1))
-      this.ticks.setMatrixAt(i, this.tmpM)
-    }
-    this.ticks.instanceMatrix.needsUpdate = true
-    this.dialMat.color.copy(hudColor).multiplyScalar(hudA * 0.45 * act(RINGS.dial))
-    this.dialInnerMat.color.copy(hudColor).multiplyScalar(hudA * 0.4 * act(1.47))
-    this.targetMat.color.copy(hudColor).multiplyScalar(hudA * 0.4 * act(RINGS.target))
-    this.alertMat.color.setRGB(v.alertColor[0], v.alertColor[1], v.alertColor[2]).multiplyScalar(v.alert * 1.6)
-    this.scanMarker.position.set(Math.cos(f.scanAngle) * 1.69, Math.sin(f.scanAngle) * 1.69, 0)
-    this.scanMarker.rotation.z = f.scanAngle + Math.PI
-    this.scanMarker.material.color.copy(hudColor).multiplyScalar(v.scan * hudA * 1.4)
-
-    for (const l of this.labels.deg) l.setColor(hudColor, hudA * 0.55 * act(1.94))
-    this.labels.title.setColor(hudColor, hudA * 0.7)
-    this.labels.state.setColor(hudColor, hudA * 0.95)
-    this.labels.cpu.setColor(hudColor, hudA * 0.8)
-    this.labels.mem.setColor(hudColor, hudA * 0.8)
-    this.labels.agents.setColor(hudColor, hudA * 0.6)
-    for (const l of this.labels.calib) l.setColor(hudColor, hudA * 0.4)
+    // ---- HUD
+    const hudA = v.hud * boot.hud * energy
+    for (const l of this.labels.deg) l.setColor(hudColor, hudA * 0.7)
+    this.labels.title.setColor(hudColor, hudA * 0.9)
+    this.labels.state.setColor(hudColor, hudA * 1.1)
+    this.labels.cpu.setColor(hudColor, hudA)
+    this.labels.mem.setColor(hudColor, hudA)
+    this.labels.agents.setColor(hudColor, hudA * 0.8)
     for (const [g, value] of [
       [this.cpuGauge, f.telemetry ? f.telemetry.cpu / 100 : 0],
       [this.memGauge, f.telemetry ? f.telemetry.memUsed / Math.max(1, f.telemetry.memTotal) : 0],
     ] as const) {
-      g.uniforms.uAlpha!.value = f.telemetry ? hudA * 0.85 : 0
+      g.uniforms.uAlpha!.value = f.telemetry ? hudA * 1.4 : 0
       g.uniforms.uFill!.value += (value - g.uniforms.uFill!.value) * Math.min(1, f.dt * 4)
       ;(g.uniforms.uColor!.value as THREE.Color).copy(hudColor)
     }
     this.labelClock -= f.dt
     if (this.labelClock <= 0) {
       this.labelClock = 0.5
-      this.labels.state.set(`STATE  ${f.stateLabel}`)
+      this.labels.state.set(`STATE ${f.stateLabel}`)
       const t = f.telemetry
       this.labels.cpu.set(t ? `CPU ${t.cpu.toFixed(0).padStart(2, ' ')}%` : 'CPU —')
       this.labels.mem.set(t ? `MEM ${(t.memUsed / 1024 ** 3).toFixed(1)}/${(t.memTotal / 1024 ** 3).toFixed(0)}G` : 'MEM —')
-      const active = f.agents.filter((a) => a.status === 'running' || a.status === 'waiting').length
-      this.labels.agents.set(`AGENTS ${active}/6`)
+      this.labels.agents.set(`AGENTS ${f.agents.filter((a) => a.status === 'running' || a.status === 'waiting').length}/6`)
     }
 
-    // Particles: low density at idle; flow inward with the user, outward with JARVIS.
-    for (const [i, l] of this.particleLayers.entries()) {
+    // ---- Particles
+    for (const l of this.sparks) {
       const u = l.mat.uniforms
-      const isMid = i === 1
-      l.phase += f.dt * (isMid ? v.flow * 0.09 : 0)
       u.uTime!.value = f.time
-      u.uPhase!.value = l.phase
-      u.uFlowAmt!.value = isMid ? Math.min(1, Math.abs(v.flow)) : 0
-      u.uDensity!.value = clamp01(v.particles * boot.particles * (isMid ? 1 + mic.level + out.level * 0.5 : 1))
-      u.uAlpha!.value = (i === 2 ? 0.05 : i === 0 ? 0.35 : 0.5) * v.energy
+      u.uBurst!.value = l.far ? 0 : this.flash * 0.35
+      u.uPull!.value = l.far ? 0 : mic.level * 2
+      u.uDensity!.value = clamp01(v.particles * boot.particles * (l.far ? 1 : 1 + this.flash * 0.6 + mic.level))
+      u.uAlpha!.value = (l.far ? 0.35 : 0.9) * energy
       u.uPixelRatio!.value = f.pixelRatio
       u.uViewH!.value = f.viewHeight
-      ;(u.uColor!.value as THREE.Color).copy(isMid && userTalking ? new THREE.Color(0.55, 0.85, 1) : tint)
+      ;(u.uColor!.value as THREE.Color).copy(userTalking && !l.far ? new THREE.Color(0.5, 0.88, 1) : tint)
     }
 
     this.updateAgents(f.agents, f.dt, f.time, tint)
+  }
+
+  private emitShock(strength: number): void {
+    const s = this.shocks[this.nextShock]!
+    this.nextShock = (this.nextShock + 1) % SHOCKS
+    s.age = 0
+    s.strength = strength
+  }
+
+  private updateWave(f: SceneFrame, userTalking: boolean): void {
+    const { out, mic, v, boot } = f
+    const src = userTalking ? mic : out
+    const level = userTalking ? mic.level : Math.min(1, out.level * 1.4)
+    const bands = src.bands
+    const R = 1.085
+    for (const mesh of [this.wave, this.waveGlow]) {
+      const width = mesh.geometry.userData.width as number
+      const pos = mesh.geometry.getAttribute('position') as THREE.BufferAttribute
+      for (let i = 0; i <= WAVE_POINTS; i++) {
+        const k = i % WAVE_POINTS
+        const a = (i / WAVE_POINTS) * Math.PI * 2
+        if (mesh === this.wave) {
+          // Mirror-symmetric band mapping + fine jitter → a waveform that reads as voice, not a sine.
+          const bf = Math.abs(Math.sin(a)) * (bands.length - 1)
+          const b0 = Math.floor(bf)
+          const band = (bands[b0] ?? 0) * (1 - (bf - b0)) + (bands[Math.min(bands.length - 1, b0 + 1)] ?? 0) * (bf - b0)
+          const jitter = 0.55 + 0.45 * Math.sin(a * 23 + f.time * 19) * Math.sin(a * 7 - f.time * 11)
+          const targetAmp = band * level * 0.32 * jitter
+          this.waveAmp[k] = this.waveAmp[k]! + (targetAmp - this.waveAmp[k]!) * Math.min(1, f.dt * 22)
+        }
+        const r = R + this.waveAmp[k]!
+        const cx = Math.cos(a)
+        const sy = Math.sin(a)
+        pos.setXYZ(i * 2, cx * (r + width / 2), sy * (r + width / 2), 0)
+        pos.setXYZ(i * 2 + 1, cx * (r - width / 2), sy * (r - width / 2), 0)
+      }
+      pos.needsUpdate = true
+      const u = mesh.material.uniforms
+      const lit = clamp01(level * 4)
+      u.uIntensity!.value = (mesh === this.wave ? 1.2 : 0.05) * lit * v.energy * boot.core
+      u.uTime!.value = f.time
+      u.uPulse!.value = 0
+      ;(u.uColor!.value as THREE.Color).copy(userTalking ? new THREE.Color(0.45, 0.88, 1) : new THREE.Color(0.85, 0.94, 1))
+    }
   }
 
   private updateAgents(agents: AgentVisual[], dt: number, time: number, color: THREE.Color): void {
@@ -805,15 +709,16 @@ export class AOPOrbScene {
     const running = this.linkMat.uniforms.uRunning!.value as number[]
     SLOT_IDS.forEach((id, i) => {
       const a = agents.find((x) => x.id === id)
-      const target = !a ? 0 : a.status === 'queued' ? 0.3 : a.status === 'completed' ? 0.45 : a.status === 'failed' ? 0.5 : 1
+      const target = !a ? 0 : a.status === 'queued' ? 0.35 : a.status === 'completed' ? 0.5 : a.status === 'failed' ? 0.6 : 1
       const current = (this.agentIntensity.get(id) ?? 0) + (target - (this.agentIntensity.get(id) ?? 0)) * k
       this.agentIntensity.set(id, current)
-      const pulse = a?.status === 'running' ? 0.75 + 0.25 * Math.sin(time * 4 + i) : a?.status === 'waiting' ? 0.7 + 0.3 * Math.sin(time * 1.5) : 1
-      this.nodeGlows[i]!.uniforms.uIntensity!.value = current * pulse * (a?.status === 'failed' ? 0.6 : 1.6)
-      ;(this.nodeGlows[i]!.uniforms.uColor!.value as THREE.Color).copy(a?.status === 'failed' ? new THREE.Color(1, 0.4, 0.35) : a?.status === 'waiting' ? new THREE.Color(1, 0.75, 0.42) : color)
-      this.nodeBeads[i]!.visible = current > 0.02
-      this.nodeBeads[i]!.scale.setScalar(0.6 + current * 0.4)
-      inten[i] = a?.status === 'running' || a?.status === 'waiting' ? current : current * 0.3
+      const pulse = a?.status === 'running' ? 0.7 + 0.3 * Math.sin(time * 5 + i) : a?.status === 'waiting' ? 0.65 + 0.35 * Math.sin(time * 1.6) : 1
+      const c = a?.status === 'failed' ? new THREE.Color(1, 0.4, 0.35) : a?.status === 'waiting' ? new THREE.Color(1, 0.75, 0.42) : color
+      this.nodeGlows[i]!.uniforms.uIntensity!.value = current * pulse * 2.2
+      ;(this.nodeGlows[i]!.uniforms.uColor!.value as THREE.Color).copy(c)
+      this.nodeRings[i]!.material.color.copy(c).multiplyScalar(current * 2.5)
+      this.nodeRings[i]!.rotation.z += dt * (a?.status === 'running' ? 2.2 : 0.4)
+      inten[i] = a?.status === 'running' || a?.status === 'waiting' ? current * 1.6 : current * 0.4
       running[i] = a?.status === 'running' ? 1 : 0
     })
     this.linkMat.uniforms.uTime!.value = time
@@ -821,18 +726,18 @@ export class AOPOrbScene {
   }
 
   particleCount(): number {
-    return this.particleLayers.reduce((n, l) => n + l.points.geometry.getAttribute('aSeed').count, 0)
+    return this.sparks.reduce((n, l) => n + l.points.geometry.getAttribute('aSeed').count, 0)
   }
 
   dispose(): void {
-    for (const l of [...Object.values(this.labels).flat(), ...this.ringIdLabels]) l.dispose()
+    for (const l of Object.values(this.labels).flat()) l.dispose()
     this.root.traverse((o) => {
-      if (o instanceof THREE.Mesh || o instanceof THREE.Points || o instanceof THREE.LineSegments) {
+      if (o instanceof THREE.Mesh || o instanceof THREE.Points) {
         o.geometry.dispose()
         const mats = Array.isArray(o.material) ? o.material : [o.material]
         mats.forEach((m: THREE.Material) => m.dispose())
       }
     })
-    for (const mat of Object.values(this.mats)) if (mat instanceof THREE.Material) mat.dispose()
+    this.mats.occluder.dispose()
   }
 }
