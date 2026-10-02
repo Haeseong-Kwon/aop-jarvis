@@ -355,8 +355,8 @@ export class AOPOrbScene {
       [p, true],
     ] as const) {
       const fill = tag(new THREE.Mesh(new THREE.ShapeGeometry(shape(pts)), this.frameFillMat), 'hide')
-      const glow = tag(new THREE.Mesh(polylineRibbon(pts, 0.06, closed), this.frameGlowMat), 'bloom')
-      const edge = tag(new THREE.Mesh(polylineRibbon(pts, 0.013, closed), this.frameEdgeMat), 'bloom')
+      const glow = tag(new THREE.Mesh(polylineRibbon(pts, 0.035, closed), this.frameGlowMat), 'bloom')
+      const edge = tag(new THREE.Mesh(polylineRibbon(pts, 0.011, closed), this.frameEdgeMat), 'bloom')
       glow.position.z = 0.001
       edge.position.z = 0.002
       this.frameGroup.add(fill, glow, edge)
@@ -549,7 +549,7 @@ export class AOPOrbScene {
     ;(cu.uColor!.value as THREE.Color).copy(tint)
     const om = this.oRingMat.uniforms
     om.uTime!.value = f.time
-    om.uIntensity!.value = 0.018 * energy * boot.core * v.ring
+    om.uIntensity!.value = 0.008 * energy * boot.core * v.ring
     ;(om.uColor!.value as THREE.Color).copy(tint)
     const orim = this.oRingOuterMat.uniforms
     orim.uIntensity!.value = (0.55 + this.flash * 1.0 + f.ignite * 0.8) * energy * boot.core * v.ring
@@ -564,7 +564,7 @@ export class AOPOrbScene {
       const u = s.mesh.material.uniforms
       u.uRadius!.value = 1.02 + Math.pow(s.age, 0.7) * 1.25
       u.uAlpha!.value = e * e * s.strength * energy * 0.5
-      u.uWidth!.value = 0.008 + s.age * 0.02
+      u.uWidth!.value = 0.005 + s.age * 0.004
       ;(u.uColor!.value as THREE.Color).copy(tint).lerp(white, 0.4)
     }
 
@@ -583,13 +583,13 @@ export class AOPOrbScene {
       u.uTime!.value = f.time
       u.uFlicker!.value = v.alert * 0.6
       const voiceLift = r.spec.name === 'EnergyRing' ? this.flash * 1.0 + mic.level * 1.2 : r.spec.name === 'TickRing' ? mic.level * 1.2 : 0
-      u.uIntensity!.value = r.spec.gain * 0.5 * (v.ring + voiceLift) * energy * Math.min(1, act * 3)
+      u.uIntensity!.value = r.spec.gain * 0.9 * (v.ring + voiceLift) * energy * Math.min(1, act * 3)
       const c = u.uColor!.value as THREE.Color
       c.copy(userTalking && (r.spec.name === 'EnergyRing' || r.spec.name === 'TickRing') ? new THREE.Color(0.45, 0.86, 1) : hudColor)
       if (r.spec.name === 'BracketRing' && v.alert > 0.01) c.lerp(new THREE.Color(v.alertColor[0], v.alertColor[1], v.alertColor[2]), v.alert)
     }
     this.markers.rotation.z += f.dt * 0.45 * v.spin
-    this.markerMat.color.copy(hudColor).multiplyScalar(1.6 * v.ring * energy * clamp01((boot.outer - 0.6) * 3))
+    this.markerMat.color.copy(hudColor).multiplyScalar(2.4 * v.ring * energy * clamp01((boot.outer - 0.6) * 3))
     const sw = this.sweepMat.uniforms
     sw.uAngle!.value = -f.scanAngle
     sw.uIntensity!.value = (0.03 + v.scan * 0.22) * energy * boot.hud
@@ -599,8 +599,8 @@ export class AOPOrbScene {
     const anyRunning = f.agents.some((a) => a.status === 'running')
     this.framePulse = (this.framePulse + f.dt * (anyRunning ? 0.5 : 0.16)) % 1
     for (const [m, k] of [
-      [this.frameEdgeMat, 0.9],
-      [this.frameGlowMat, 0.12],
+      [this.frameEdgeMat, 1.9],
+      [this.frameGlowMat, 0.06],
     ] as const) {
       const u = m.uniforms
       u.uIntensity!.value = k * v.frame * energy
@@ -611,7 +611,7 @@ export class AOPOrbScene {
       ;(u.uColor!.value as THREE.Color).copy(tint)
     }
     const fu = this.frameFillMat.uniforms
-    fu.uIntensity!.value = 0.12 * v.frame * energy * boot.mark
+    fu.uIntensity!.value = 0.16 * v.frame * energy * boot.mark
     fu.uTime!.value = f.time
     fu.uScanPos!.value = 1.3 - ((f.time * 0.35) % 2.6)
     ;(fu.uColor!.value as THREE.Color).copy(tint)
@@ -619,12 +619,12 @@ export class AOPOrbScene {
 
     // ---- HUD
     const hudA = v.hud * boot.hud * energy
-    for (const l of this.labels.deg) l.setColor(hudColor, hudA * 0.7)
-    this.labels.title.setColor(hudColor, hudA * 0.9)
-    this.labels.state.setColor(hudColor, hudA * 1.1)
-    this.labels.cpu.setColor(hudColor, hudA)
-    this.labels.mem.setColor(hudColor, hudA)
-    this.labels.agents.setColor(hudColor, hudA * 0.8)
+    for (const l of this.labels.deg) l.setColor(hudColor, hudA * 1.1)
+    this.labels.title.setColor(hudColor, hudA * 1.3)
+    this.labels.state.setColor(hudColor, hudA * 1.5)
+    this.labels.cpu.setColor(hudColor, hudA * 1.4)
+    this.labels.mem.setColor(hudColor, hudA * 1.4)
+    this.labels.agents.setColor(hudColor, hudA * 1.2)
     for (const [g, value] of [
       [this.cpuGauge, f.telemetry ? f.telemetry.cpu / 100 : 0],
       [this.memGauge, f.telemetry ? f.telemetry.memUsed / Math.max(1, f.telemetry.memTotal) : 0],

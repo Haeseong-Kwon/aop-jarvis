@@ -8,12 +8,14 @@ import { decodeWav } from '../src/voice/audio'
 describe('TranscriptWakeWord', () => {
   const wake = new TranscriptWakeWord()
   it.each([
-    ['AOP', true, ''],
-    ['A.O.P. 크롬 켜', true, '크롬 켜'],
-    ['에이오피, 지금 몇 시야?', true, '지금 몇 시야?'],
-    ['Jarvis open Slack', true, 'open Slack'],
+    ['헤이 자비스', true, ''],
+    ['Hey Jarvis.', true, ''],
+    ['Hey, Jarvis, what time is it?', true, 'what time is it?'],
+    ['헤이 자비스, 크롬 켜', true, '크롬 켜'],
+    ['자비스 지금 몇 시야?', true, '지금 몇 시야?'],
     ['오늘 점심 뭐 먹지', false, ''],
-    ['그건 AOP 문제야', false, ''],
+    ['AOP 회의 몇 시야', false, ''],
+    ['그건 자비스 문제야', false, ''],
   ])('%s', (text, woke, command) => expect(wake.match(text)).toEqual({ woke, command }))
 })
 
@@ -96,7 +98,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0))
 
 describe('VoiceSession lifecycle', () => {
   it('wake → listen → think → speak → listen', async () => {
-    const h = harness(['AOP', 'open chrome'])
+    const h = harness(['Hey Jarvis', 'open chrome'])
     h.session.speechStart()
     await h.session.speechEnd(h.utterance) // "AOP" → wake only
     expect(h.session.state).toBe('LISTENING')
@@ -112,7 +114,7 @@ describe('VoiceSession lifecycle', () => {
   })
 
   it('runs a command spoken together with the wake word', async () => {
-    const h = harness(['에이오피 크롬 켜'])
+    const h = harness(['헤이 자비스 크롬 켜'])
     h.session.speechStart()
     const pending = h.session.speechEnd(h.utterance)
     await tick()

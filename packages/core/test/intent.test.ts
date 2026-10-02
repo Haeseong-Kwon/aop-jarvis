@@ -5,6 +5,7 @@ describe('intent engine (L0/L1, no model)', () => {
   it.each([
     ['Chrome 켜.', 'app.open', { app: 'Google Chrome' }],
     ['크롬 열어줘', 'app.open', { app: 'Google Chrome' }],
+    ['크롬케', 'app.open', { app: 'Google Chrome' }],
     ['open Slack', 'app.open', { app: 'Slack' }],
     ['슬랙 꺼', 'app.quit', { app: 'Slack' }],
     ['현재 메모리 상태 확인해.', 'system.memory', {}],

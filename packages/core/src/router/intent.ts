@@ -216,7 +216,8 @@ const RULES: Rule[] = [
   },
   {
     name: 'app.open',
-    test: /^(.+?)\s*(켜|열어|실행해?|띄워|켜줘|열어줘|실행시켜)(줘)?[.!]?$|^(open|launch|start)\s+(.+)$/i,
+    // '케' covers whisper's frequent transcription of a spoken '켜' ("크롬 켜" → "크롬케").
+    test: /^(.+?)\s*(켜|케|열어|실행해?|띄워|켜줘|열어줘|실행시켜)(줘)?[.!]?$|^(open|launch|start)\s+(.+)$/i,
     tier: 'L0',
     confidence: 0.9,
     complexity: 0,

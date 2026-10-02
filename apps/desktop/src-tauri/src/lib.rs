@@ -7,6 +7,12 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
 
+/// True when the OS started the app at login (silent standby until "Hey Jarvis").
+#[tauri::command]
+fn launched_at_login() -> bool {
+    std::env::args().any(|a| a == "--autostart")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -18,6 +24,8 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
+        // Login item; "--autostart" tells the UI to start as a silent standby orb.
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--autostart"])))
         .manage(proc::Procs::default())
         .manage(system::Sys::default())
         .invoke_handler(tauri::generate_handler![
@@ -40,6 +48,7 @@ pub fn run() {
             secrets::secret_get,
             secrets::secret_set,
             secrets::secret_exists,
+            launched_at_login,
         ])
         .setup(|app| {
             // Menu-bar resident: JARVIS keeps running when the window is hidden.

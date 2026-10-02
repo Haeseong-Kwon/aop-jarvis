@@ -1,6 +1,9 @@
 import { decodeWav, type AudioOutput, type PcmChunk } from '@aop/core'
 import { BAND_COUNT, readBands, readRms, type AudioLevels } from './levels'
 
+/** Suspend idle audio contexts after this long, so the Mac can still idle-sleep while JARVIS waits. */
+const IDLE_SUSPEND_MS = 1500
+
 export interface SpeechQueueStats {
   /** Audio scheduled but not yet played (ms). */
   queuedMs: number
@@ -42,6 +45,7 @@ export class SpeechOutput implements AudioOutput {
   private time = new Float32Array(1024)
   private refTime = new Float32Array(256)
   private generation = 0
+  private idleTimer: ReturnType<typeof setTimeout> | null = null
   onActiveChange: (active: boolean) => void = () => undefined
 
   constructor(mastering = true) {
@@ -49,6 +53,22 @@ export class SpeechOutput implements AudioOutput {
     this.analyser.smoothingTimeConstant = 0.35
     this.fade.connect(this.analyser).connect(this.ctx.destination)
     this.setMastering(mastering)
+    // A running context holds the output device open, which macOS counts as "playing audio" and which
+    // prevents idle sleep. Stay suspended until there is something to say.
+    void this.ctx.suspend()
+  }
+
+  private wakeContext(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer)
+    this.idleTimer = null
+    if (this.ctx.state === 'suspended') void this.ctx.resume()
+  }
+
+  private sleepSoon(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer)
+    this.idleTimer = setTimeout(() => {
+      if (!this.started && !this.sources.size) void this.ctx.suspend()
+    }, IDLE_SUSPEND_MS)
   }
 
   /** Subtle mastering — the model must provide the natural voice; this only cleans and steadies it. */
@@ -97,7 +117,7 @@ export class SpeechOutput implements AudioOutput {
     this.onFirst = onFirstAudio ?? null
     this.started = false
     this.chunks = 0
-    if (this.ctx.state === 'suspended') void this.ctx.resume()
+    this.wakeContext()
     this.fade.gain.cancelScheduledValues(this.ctx.currentTime)
     this.fade.gain.setValueAtTime(1, this.ctx.currentTime)
     this.nextTime = 0
@@ -172,6 +192,7 @@ export class SpeechOutput implements AudioOutput {
     const r = this.drainResolve
     this.drainResolve = null
     r?.()
+    this.sleepSoon()
   }
 
   /** Immediate stop (barge-in): ~12 ms fade, cancel everything queued. */
@@ -238,6 +259,7 @@ export class BootAudio {
 
   constructor() {
     this.gain.connect(this.ctx.destination)
+    void this.ctx.suspend()
   }
 
   async play(bytes: Uint8Array, s: BootAudioSettings): Promise<void> {
@@ -272,6 +294,7 @@ export class BootAudio {
     this.gain.gain.linearRampToValueAtTime(0, now + ms / 1000)
     source.stop(now + ms / 1000 + 0.05)
     this.source = null
+    setTimeout(() => !this.source && void this.ctx.suspend(), ms + IDLE_SUSPEND_MS)
   }
 
   stop(): void {
@@ -281,5 +304,6 @@ export class BootAudio {
       /* not started */
     }
     this.source = null
+    void this.ctx.suspend()
   }
 }

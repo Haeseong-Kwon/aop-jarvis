@@ -32,7 +32,7 @@ export class HudLabel {
   set(text: string): void {
     if (text === this.text) return
     this.text = text
-    const px = 40
+    const px = 96
     const font = FONT.replace('{px}', String(px))
     this.ctx.font = font
     const glyphs = [...text]
@@ -52,8 +52,10 @@ export class HudLabel {
     this.texture.dispose()
     this.texture = new THREE.CanvasTexture(this.canvas)
     this.texture.colorSpace = THREE.SRGBColorSpace
-    this.texture.minFilter = THREE.LinearFilter
-    this.texture.generateMipmaps = false
+    // High-res glyphs + mipmaps + anisotropy keep small HUD text crisp at any scale.
+    this.texture.minFilter = THREE.LinearMipmapLinearFilter
+    this.texture.generateMipmaps = true
+    this.texture.anisotropy = 8
     this.mesh.material.map = this.texture
     this.mesh.material.needsUpdate = true
     const aspect = w / h

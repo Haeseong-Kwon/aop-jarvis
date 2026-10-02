@@ -160,11 +160,27 @@ Every voice turn emits `voice:latency` for: `wake`, `stt`, `handler` (router + L
 
 ## Wake vs cold boot
 
-| | Cold boot | Daily wake ("AOP", hotkey, click) |
+| | Cold boot | Daily wake ("Hey Jarvis", hotkey, click) |
 |---|---|---|
 | Visual | 3.4 s assembly sequence | 220 ms ignition → LISTENING |
-| Greeting | "시스템 준비가 완료되었습니다." / "AOP online." (configurable, can be off; only if the AOP voice is ready within 6 s) | none |
+| Greeting | `bootGreetingText` over the boot track (only if the AOP voice is ready within 10 s; the mic starts in parallel so a permission prompt can't block it) | none |
 | Replay | Developer › Graphics › Replay cinematic boot | — |
+
+## Wake word and login standby
+
+**Wake phrase:** "Hey Jarvis" / "헤이 자비스".
+- The lead-in is optional, so "Jarvis" or "자비스" alone also works.
+- The wake word must open the utterance. Accepted lead-ins: hey, 헤이, 해이, 에이, ok, 야, 저기.
+- Variants handle whisper spellings: jarvis, jervis, javis, 자비스, 쟈비스, 재비스, 자르비스.
+- **"AOP" is not a wake word.** The user says it constantly when talking about the products.
+- Verified on synthesized Korean and English speech through the production whisper.cpp path: wakes in ~0.3 s, and "AOP 회의…" or ordinary talk doesn't trigger it.
+- Saying it from idle brings the window forward, expanding from the ambient orb.
+- "Hey Jarvis, <command>" runs the command in the same breath.
+
+**Launch at login** (`launchAtLogin`, default on): macOS starts JARVIS with `--autostart`.
+- It boots silently as the ambient orb (no music, no greeting) and listens.
+- The **first** "Hey Jarvis" plays the full welcome: boot track, assembly replay, greeting, then a 5 s follow-up listening window for the command.
+- A wake that already carries a command just runs it.
 
 ## Config keys (`config.voice`, new)
 

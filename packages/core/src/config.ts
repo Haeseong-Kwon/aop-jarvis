@@ -30,7 +30,8 @@ const policy = z.enum(['auto', 'approve'])
 const voiceSchema = z.object({
   enabled: z.boolean().default(true),
   wakeWordEnabled: z.boolean().default(true),
-  wakeWords: z.array(z.string()).default(['aop', 'a.o.p', '에이오피', '에이 오 피', 'jarvis', '자비스']),
+  /** Extra wake variants on top of the built-in "Hey Jarvis" set. */
+  wakeWords: z.array(z.string()).default([]),
   whisperBin: z.string().default('whisper-cli'),
   sttModelPath: z.string().default('~/Library/Application Support/aop-jarvis/models/ggml-small-q5_1.bin'),
   // 'ko' measured faster and more accurate for Korean while still transcribing English phrases (whisper.cpp small).
@@ -84,6 +85,8 @@ const memorySchema = z.object({
 
 export const configSchema = z.object({
   onboarded: z.boolean().default(false),
+  /** Start at login (menu-bar resident) so "Hey Jarvis" works without opening the app first. */
+  launchAtLogin: z.boolean().default(true),
   hotkey: z.string().default('CommandOrControl+Shift+J'),
   models: z
     .object({

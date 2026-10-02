@@ -57,9 +57,10 @@ void main() {
     float f = fract(vU * uCount);
     m = aa(f - 0.02, w * uCount) * aa(uDuty - f, w * uCount);
   }
-  // Soft edges across the band read as light, not geometry.
-  float across = smoothstep(0.0, 0.25, vV) * smoothstep(1.0, 0.75, vV);
-  float core = exp(-pow((vV - 0.5) / 0.18, 2.0)) * uCore;
+  // Crisp band: 1-pixel anti-aliased edges (fwidth), flat interior, plus an optional hot centre line.
+  float wv = fwidth(vV) * 1.2;
+  float across = smoothstep(0.0, wv, vV) * smoothstep(1.0, 1.0 - wv, vV);
+  float core = smoothstep(0.5 - 0.12 - wv, 0.5 - 0.12, vV) * smoothstep(0.5 + 0.12 + wv, 0.5 + 0.12, vV) * uCore;
   float d = abs(fract(vU - uHl + 0.5) - 0.5);
   float hl = exp(-d * d / (uHlWidth * uHlWidth)) * uHlGain;
   float head = smoothstep(uReveal - 0.04, uReveal, vU) * step(uReveal, 0.999) * 4.0;
@@ -82,7 +83,8 @@ uniform float uTime;
 varying float vS; varying float vSide;
 void main() {
   if (vS > uReveal) discard;
-  float across = exp(-vSide * vSide * 3.0);
+  float ws = fwidth(vSide) * 1.2;
+  float across = smoothstep(1.0, 1.0 - ws, abs(vSide)) * (0.75 + 0.5 * smoothstep(0.45, 0.0, abs(vSide)));
   float head = smoothstep(uReveal - 0.03, uReveal, vS) * step(uReveal, 0.999) * 6.0;
   float p1 = exp(-pow(fract(vS - uPulsePos + 0.5) - 0.5, 2.0) * 1400.0);
   float p2 = exp(-pow(fract(vS - uPulsePos * 0.7 + 0.13 + 0.5) - 0.5, 2.0) * 2600.0) * 0.6;
@@ -113,7 +115,7 @@ float hexEdge(vec2 p) {
   return smoothstep(0.44, 0.5, d);
 }
 void main() {
-  float lines = 0.55 + 0.45 * sin(vP.y * 420.0 - uTime * 2.0);
+  float lines = 0.7 + 0.3 * step(0.5, fract(vP.y * 90.0 - uTime * 0.4));
   float band = exp(-pow(vP.y - uScanPos, 2.0) * 40.0) * 2.2;
   float hex = hexEdge(vP) * 0.6;
   float e = (0.18 * lines + hex * 0.35 + band) ;
@@ -175,7 +177,7 @@ varying vec2 vP;
 void main() {
   float r = length(vP);
   float d = (r - uRadius) / uWidth;
-  float e = exp(-d * d) * 1.4 + exp(-pow((r - uRadius * 0.985) / (uWidth * 2.5), 2.0)) * 0.08;
+  float e = exp(-d * d) * 1.8;
   gl_FragColor = vec4(uColor * e * uAlpha, 1.0);
 }`,
 }

@@ -91,6 +91,9 @@ function General({ d, set }: P) {
   }
   return (
     <>
+      <Field label="Launch at login" hint="Waits quietly in the corner; say “Hey Jarvis” to bring it up">
+        <Toggle value={d.launchAtLogin} onChange={(v) => set((c) => ({ ...c, launchAtLogin: v }))} />
+      </Field>
       <Field label="Active project" hint="Where code commands run">
         <div style={{ display: 'flex', gap: 6 }}>
           <Text value={d.context.activeProjectPath} placeholder="/Users/you/code/project" onChange={(v) => set((c) => ({ ...c, context: { ...c.context, activeProjectPath: v } }))} />
@@ -160,7 +163,7 @@ function Voice({ d, set }: P) {
   return (
     <>
       <Field label="Voice" hint="Microphone, wake word and speech output"><Toggle value={v.enabled} onChange={(x) => upd({ enabled: x })} /></Field>
-      <Field label="Wake word" hint={`Say "AOP" or "Jarvis"`}><Toggle value={v.wakeWordEnabled} onChange={(x) => upd({ wakeWordEnabled: x })} /></Field>
+      <Field label="Wake word" hint={`Say "Hey Jarvis" (or "헤이 자비스")`}><Toggle value={v.wakeWordEnabled} onChange={(x) => upd({ wakeWordEnabled: x })} /></Field>
       <Field label="Interrupt while speaking" hint="Talking over JARVIS stops it"><Toggle value={v.bargeIn} onChange={(x) => upd({ bargeIn: x })} /></Field>
       <Field label="Microphone">
         <select value={v.inputDeviceId} onChange={(e) => upd({ inputDeviceId: e.target.value })}>

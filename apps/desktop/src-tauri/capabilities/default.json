@@ -29,6 +29,9 @@
     "global-shortcut:allow-unregister-all",
     "global-shortcut:allow-is-registered",
     "dialog:allow-open",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled",
     {
       "identifier": "http:default",
       "allow": [{ "url": "http://127.0.0.1:*" }, { "url": "http://localhost:*" }, { "url": "https://*" }]

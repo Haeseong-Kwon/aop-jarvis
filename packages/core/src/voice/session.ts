@@ -55,9 +55,10 @@ export interface AudioOutput {
 export type LatencyStage = 'wake' | 'vad_end' | 'stt' | 'handler' | 'tts_first_chunk' | 'first_audio' | 'turn_total' | 'interrupt'
 
 // Transcript-based wake word: whisper writes "AOP" many ways. Matching happens on a normalized form.
-const WAKE_VARIANTS = ['aop', 'a.o.p', 'ao p', 'eiop', '에이오피', '에이오비', '에이오프', '에이 오 피', '에이오 피', '에이 오피', 'jarvis', '자비스', '쟈비스']
+// "Hey Jarvis" (the lead-in is optional). Not "AOP": the user says AOP constantly when talking about the products.
+const WAKE_VARIANTS = ['jarvis', 'jervis', 'javis', 'jarvas', '자비스', '쟈비스', '재비스', '자르비스', '자비쓰']
 
-const WAKE_FILLERS = new Set(['', 'hey', 'ok', 'okay', 'hi', '야', '헤이', '저기', '오케이'])
+const WAKE_FILLERS = new Set(['', 'hey', 'hei', 'hay', 'ok', 'okay', 'hi', '야', '헤이', '해이', '헤이야', '에이', '저기', '오케이'])
 
 export class TranscriptWakeWord implements WakeWordProvider {
   readonly id = 'transcript'

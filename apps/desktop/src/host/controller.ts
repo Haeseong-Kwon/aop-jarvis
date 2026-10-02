@@ -2,6 +2,8 @@ import { createRuntime, deriveRuntimeState, errorMessage, expandHome, Transcript
 import { listen } from '@tauri-apps/api/event'
 import { currentMonitor, getCurrentWindow, LogicalPosition, LogicalSize } from '@tauri-apps/api/window'
 import { register, unregisterAll } from '@tauri-apps/plugin-global-shortcut'
+import { disable as disableAutostart, enable as enableAutostart, isEnabled as autostartEnabled } from '@tauri-apps/plugin-autostart'
+import { invoke } from '@tauri-apps/api/core'
 import { Microphone } from '../audio/mic'
 import { BootAudio, SpeechOutput } from '../audio/output'
 import { store, type UiMode, type WindowMode } from '../store'
@@ -24,6 +26,9 @@ export class Controller {
   private metricsTimer: ReturnType<typeof setInterval> | null = null
   private disposers: (() => void)[] = []
   private warmed: Promise<void> | null = null
+  /** Started at login: a silent ambient orb until the first "Hey Jarvis" brings the full welcome. */
+  standby = false
+  private silentBoot = false
 
   private constructor(readonly rt: Runtime) {
     const cfg = rt.getConfig()
@@ -65,6 +70,7 @@ export class Controller {
     const db = await openDatabase()
     const rt = await createRuntime(native, db)
     const c = new Controller(rt)
+    c.standby = await invoke<boolean>('launched_at_login').catch(() => false)
     c.wire()
     store.set({ config: rt.getConfig(), uiMode: rt.getConfig().orb.uiMode, devOpen: rt.getConfig().developer.panel || rt.getConfig().orb.uiMode === 'developer' })
     return c
@@ -75,7 +81,20 @@ export class Controller {
   private wire(): void {
     const { bus } = this.rt
     const on = <T>(off: () => T) => this.disposers.push(off as () => void)
-    on(bus.on('voice:state', ({ state }) => this.update({ voice: state })))
+    on(
+      bus.on('voice:state', ({ state }) => {
+        const prev = store.get().voice
+        // "Hey Jarvis" from idle brings the window forward (expanding from the ambient orb).
+        if (prev === 'IDLE' && (state === 'LISTENING' || state === 'THINKING')) {
+          void this.reveal()
+          if (this.standby) {
+            this.standby = false
+            if (state === 'LISTENING') void this.welcome() // wake word alone; "Hey Jarvis, <command>" just runs it
+          }
+        }
+        this.update({ voice: state })
+      }),
+    )
     on(bus.on('voice:transcript', ({ text }) => store.set({ transcript: text })))
     on(
       bus.on('voice:latency', ({ stage, ms }) => {
@@ -162,12 +181,14 @@ export class Controller {
   // ---- lifecycle ---------------------------------------------------------------------
 
   /** Boot: real readiness checks run in parallel with the visual timeline; labels wait for real results. */
-  async boot(): Promise<void> {
+  async boot(opts: { silent?: boolean } = {}): Promise<void> {
     if (store.get().booting) return
     store.set({ readiness: {}, bootStartedAt: performance.now() })
     this.update({ booting: true, booted: false })
     const cfg = this.rt.getConfig()
-    void this.playBootAudio(cfg)
+    this.silentBoot = !!opts.silent
+    if (!this.silentBoot) void this.playBootAudio(cfg)
+    void this.syncLaunchAtLogin(cfg.launchAtLogin)
     // Load the voice while the boot sequence plays, so the greeting can start the moment it ends (~3 s cold start).
     if (cfg.voice.enabled && cfg.voice.bootGreeting) void this.warmVoice()
     await this.rt.checkReadiness().catch((error: unknown) => this.rt.bus.emit('error', { code: 'NOT_CONFIGURED', message: errorMessage(error) }))
@@ -182,6 +203,7 @@ export class Controller {
     const cfg = this.rt.getConfig()
     const fadeMusic = (afterMs: number) => setTimeout(() => this.bootAudio.fadeOut(cfg.boot.fadeOutMs), afterMs)
     if (!cfg.voice.enabled) return void fadeMusic(BOOT_AUDIO_TAIL_MS)
+    if (this.silentBoot) return void this.startMic(cfg.voice.inputDeviceId) // standby: listen for "Hey Jarvis", say nothing
     // Don't await the mic: a pending macOS permission prompt would otherwise hold back the greeting.
     void this.startMic(cfg.voice.inputDeviceId)
     // The music plays under the greeting (ducked) and fades out after it, instead of cutting it off on a timer.
@@ -193,14 +215,37 @@ export class Controller {
    * Cold-boot greeting only (never on ordinary wake). It waits briefly for the primary voice; if the premium
    * engine isn't ready, JARVIS stays silent rather than greeting in the fallback voice.
    */
-  private async greet(): Promise<boolean> {
+  private async greet(listenAfter = false): Promise<boolean> {
     const cfg = this.rt.getConfig()
     if (!cfg.voice.bootGreeting) return false
     const ready = await Promise.race([this.warmVoice().then(() => this.rt.tts.active === 'primary'), new Promise<boolean>((r) => setTimeout(() => r(false), GREETING_VOICE_WAIT_MS))])
-    if (!ready || store.get().voice !== 'IDLE') return false
+    const state = store.get().voice
+    if (!ready || (state !== 'IDLE' && !(listenAfter && state === 'LISTENING'))) return false
     const text = cfg.voice.bootGreetingText.trim() || (cfg.voice.sttLanguage === 'ko' ? '시스템 준비가 완료되었습니다.' : 'AOP online.')
-    await this.voice.speak(text, /[가-힣]/.test(text) ? 'ko' : 'en')
+    await this.voice.speak(text, /[가-힣]/.test(text) ? 'ko' : 'en', listenAfter)
     return true
+  }
+
+  /**
+   * First "Hey Jarvis" after a login standby: the full welcome — boot track, assembly replay, greeting —
+   * then keep listening for the command.
+   */
+  private async welcome(): Promise<void> {
+    const cfg = this.rt.getConfig()
+    void this.playBootAudio(cfg)
+    this.replayBoot()
+    await new Promise((r) => setTimeout(r, 3400))
+    const greeted = await this.greet(true)
+    setTimeout(() => this.bootAudio.fadeOut(cfg.boot.fadeOutMs), greeted ? GREETING_MUSIC_TAIL_MS : BOOT_AUDIO_TAIL_MS)
+  }
+
+  /** Keep the macOS login item in line with the setting. */
+  private async syncLaunchAtLogin(want: boolean): Promise<void> {
+    try {
+      if ((await autostartEnabled()) !== want) await (want ? enableAutostart() : disableAutostart())
+    } catch (error) {
+      this.rt.bus.emit('error', { code: 'NOT_CONFIGURED', message: `Launch at login: ${errorMessage(error)}` })
+    }
   }
 
   /** Lazy model residency: the TTS model loads on first voice use and then stays resident in the sidecar. */
@@ -277,6 +322,14 @@ export class Controller {
     if (this.rt.getConfig().voice.enabled) void this.voice.speak(res.response, res.lang)
   }
 
+  /** Bring the window forward without changing what the voice session is doing. */
+  async reveal(): Promise<void> {
+    const w = getCurrentWindow()
+    await w.show()
+    await w.setFocus()
+    if (store.get().mode === 'ambient') await this.setMode('expanded')
+  }
+
   /** Hotkey / orb click: show, expand from ambient, listen. */
   async summon(): Promise<void> {
     const w = getCurrentWindow()
@@ -314,6 +367,7 @@ export class Controller {
       void this.warmVoice()
     }
     if (saved.hotkey !== prev.hotkey) await this.registerHotkey(saved.hotkey)
+    if (saved.launchAtLogin !== prev.launchAtLogin) await this.syncLaunchAtLogin(saved.launchAtLogin)
     if (saved.voice.inputDeviceId !== prev.voice.inputDeviceId && this.mic.active) await this.startMic(saved.voice.inputDeviceId)
     if (!saved.voice.enabled && this.mic.active) await this.mic.stop()
   }

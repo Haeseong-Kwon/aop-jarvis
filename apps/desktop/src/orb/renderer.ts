@@ -174,8 +174,8 @@ export class OrbRenderer {
           uStreak: { value: 0.09 },
           uExposure: { value: 1.05 },
           uVignette: { value: 0.5 },
-          uGrain: { value: 0.012 },
-          uCA: { value: 0.014 },
+          uGrain: { value: 0.005 },
+          uCA: { value: 0.002 },
           uTime: { value: 0 },
           uTexel: { value: new THREE.Vector2(1 / w, 1 / h) },
           uAspect: { value: w / h },
@@ -192,7 +192,7 @@ export class OrbRenderer {
       this.bloomComposer.renderToScreen = false
       this.bloomComposer.setPixelRatio(this.dynamicRatio * preset.bloomScale)
       this.bloomComposer.addPass(new RenderPass(this.scene, this.camera))
-      this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w * preset.bloomScale, h * preset.bloomScale), preset.bloomStrength, 0.4, 0.85)
+      this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w * preset.bloomScale, h * preset.bloomScale), preset.bloomStrength, 0.22, 1.25)
       this.bloomComposer.addPass(this.bloomPass)
       this.bloomComposer.setSize(w, h)
     }
@@ -317,7 +317,7 @@ export class OrbRenderer {
 
     const cu = this.compositePass.uniforms
     cu.uTime!.value = this.time
-    cu.uStreak!.value = this.preset().streak ? 0.08 + boot.flare * 0.3 + this.ignite * 0.08 : 0
+    cu.uStreak!.value = this.preset().streak ? 0.03 + boot.flare * 0.25 + this.ignite * 0.05 : 0
   }
 
   /** Selective bloom: only objects tagged 'bloom' emit; opaque structure occludes as black; the rest is hidden. */

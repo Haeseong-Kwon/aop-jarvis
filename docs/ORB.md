@@ -83,13 +83,18 @@ The flash is carried by thin, hot elements (rims, rays, shock fronts) rather tha
 ## Post-processing (`renderer.ts`)
 
 ```
-Bloom pass (½ res):  bloom-tagged emitters only  →  UnrealBloomPass (strength preset, radius 0.4, threshold 0.85)
+Bloom pass (½ res):  bloom-tagged emitters only  →  UnrealBloomPass (strength preset, radius 0.22, threshold 1.25)
 Main pass (MSAA):    full scene into a HalfFloat target (linear HDR)
-Composite:           + bloom ×0.9 + anamorphic streak (0.08, flare/ignite boost)
-                     → exposure 1.05 → ACES → vignette 0.5 → chromatic aberration 0.014 → sRGB → grain
+Composite:           + bloom ×0.9 + anamorphic streak (0.03, flare/ignite boost)
+                     → exposure 1.05 → ACES → vignette 0.5 → chromatic aberration 0.002 → sRGB → grain 0.005
 ```
 
-The bloom threshold is deliberately high. With eight ring layers, a low threshold summed every line into a grey haze. Now only hot cores, rims, highlights and flashes bloom.
+**Sharpness rules:**
+- Ring bands and ribbons have 1-pixel anti-aliased edges (`fwidth`) with a flat interior, not soft gaussians.
+- Chromatic aberration, streak and grain are minimal.
+- The bloom threshold sits above the linework, so lines never halo; only the core, highlights, speech flashes and shock fronts bloom.
+- HUD text renders from 96 px glyph textures with mipmaps and anisotropic filtering.
+- Shock fronts stay thin (0.005–0.009) as they expand.
 
 ## Camera rig
 

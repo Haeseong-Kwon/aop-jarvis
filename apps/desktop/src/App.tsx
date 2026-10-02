@@ -65,7 +65,11 @@ function Workspace({ c }: { c: Controller }) {
     document.body.dataset.mode = uiMode
   }, [mode, uiMode])
   useEffect(() => {
-    if (onboarded && !booted && !store.get().booting) void c.boot()
+    if (onboarded && !booted && !store.get().booting) {
+      // Login standby: shrink to the ambient orb and boot silently; "Hey Jarvis" brings the welcome.
+      if (c.standby) void c.setMode('ambient').then(() => c.boot({ silent: true }))
+      else void c.boot()
+    }
   }, [onboarded, booted, c])
 
   return (
